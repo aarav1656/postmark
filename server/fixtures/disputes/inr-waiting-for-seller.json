@@ -1,0 +1,35 @@
+{
+  "dispute_id": "PP-D-27803",
+  "create_time": "2026-11-12T09:41:35.000Z",
+  "update_time": "2026-11-12T09:41:41.000Z",
+  "disputed_transactions": [
+    {
+      "seller_transaction_id": "2BF87082EJ6705914",
+      "buyer_transaction_id": "6UC33626JV0397519",
+      "create_time": "2026-11-11T13:02:10.000Z",
+      "transaction_status": "COMPLETED",
+      "gross_amount": { "currency_code": "USD", "value": "60.00" },
+      "invoice_number": "",
+      "custom": "listing:demo",
+      "buyer": { "name": "Priya Raman" },
+      "seller": { "email": "sb-seller@business.example.com", "merchant_id": "8XK4PL3RJNS4Q", "name": "Postmark Test Store" },
+      "items": [ { "item_id": "listing:demo", "item_name": "Kodak Duaflex II camera", "item_quantity": "1" } ]
+    }
+  ],
+  "reason": "MERCHANDISE_OR_SERVICE_NOT_RECEIVED",
+  "status": "WAITING_FOR_SELLER_RESPONSE",
+  "dispute_amount": { "currency_code": "USD", "value": "60.00" },
+  "dispute_outcome": null,
+  "dispute_life_cycle_stage": "CHARGEBACK",
+  "dispute_channel": "INTERNAL",
+  "seller_response_due_date": "2026-11-22T09:41:41.000Z",
+  "messages": [
+    { "posted_by": "BUYER", "time_posted": "2026-11-12T09:41:38.000Z", "content": "Package never arrived." }
+  ],
+  "offer": { "buyer_requested_amount": { "currency_code": "USD", "value": "60.00" } },
+  "links": [
+    { "href": "https://api-m.sandbox.paypal.com/v1/customer/disputes/PP-D-27803", "rel": "self", "method": "GET" },
+    { "href": "https://api-m.sandbox.paypal.com/v1/customer/disputes/PP-D-27803/accept-claim", "rel": "accept_claim", "method": "POST" },
+    { "href": "https://api-m.sandbox.paypal.com/v1/customer/disputes/PP-D-27803/provide-evidence", "rel": "provide_evidence", "method": "POST" }
+  ]
+}

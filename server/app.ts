@@ -21,6 +21,7 @@ import { CheckoutPaymentIntent, ItemCategory, PaypalExperienceUserAction, Paypal
 import { renderSandboxLabel } from '../src/domain/sandbox-label.ts';
 import { findTracker } from '../src/domain/tracker.ts';
 import { resetLabelAssessment } from './label-assessment.ts';
+import { AlreadyAnswered, DEMO_DISPUTE_PREFIX, autoAnswerEnabled, demoClient, demoDispute, handleDispute, paypalDisputeClient, planFor, resetDemoDispute, storeDispute, submitEvidence, timeline } from './dispute-answer.ts';
 
 export const app = new Hono();
 const frontendOrigin = new URL(process.env.PUBLIC_URL || 'http://localhost:8787').origin;
@@ -387,13 +388,44 @@ app.post('/api/disputes/reconcile', async (c) => {
   catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Disputes could not be reconciled' }, 502); }
 });
 app.get('/api/disputes/:id', async (c) => {
-  const unavailable = requirePaypal(c); if (unavailable) return unavailable;
+  const id = c.req.param('id');
+  const demo = id.startsWith(DEMO_DISPUTE_PREFIX);
+  if (!demo) { const unavailable = requirePaypal(c); if (unavailable) return unavailable; }
   try {
-    const dispute = await paypal<PayPalDispute & Record<string, any>>(`/v1/customer/disputes/${encodeURIComponent(c.req.param('id'))}`);
-    const rows = db.prepare('SELECT * FROM orders').all() as unknown as StoredOrder[];
-    const order = matchDisputeToOrder(dispute, rows);
-    return c.json({ dispute: { dispute_id: dispute.dispute_id, status: dispute.status, reason: dispute.reason, seller_response_due_date: dispute.seller_response_due_date }, order: order ? publicOrder(order.id) : null });
+    const dispute = demo ? await localDispute(id) : await paypal<PayPalDispute & Record<string, any>>(`/v1/customer/disputes/${encodeURIComponent(id)}`);
+    if (!dispute) return c.json({ error: 'Dispute not found' }, 404);
+    const { order, plan } = planFor(dispute);
+    return c.json({ dispute: { dispute_id: dispute.dispute_id, status: dispute.status, reason: dispute.reason, seller_response_due_date: dispute.seller_response_due_date }, order: order ? publicOrder(order.id) : null, ...answerView(id, plan) });
   } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Dispute lookup failed' }, 502); }
+});
+async function localDispute(id: string) {
+  const row = db.prepare('SELECT details_json FROM disputes WHERE id=?').get(id) as { details_json: string } | undefined;
+  return row ? JSON.parse(row.details_json) as PayPalDispute & Record<string, any> : undefined;
+}
+function answerView(id: string, plan: ReturnType<typeof planFor>['plan']) {
+  const row = db.prepare('SELECT evidence_submitted_at, evidence_notes FROM disputes WHERE id=?').get(id) as { evidence_submitted_at: string | null; evidence_notes: string | null } | undefined;
+  return { plan, timeline: timeline(id), submittedAt: row?.evidence_submitted_at ?? null, submittedNotes: row?.evidence_notes ?? null, autoAnswer: autoAnswerEnabled(), simulated: id.startsWith(DEMO_DISPUTE_PREFIX) };
+}
+app.get('/api/orders/:id/disputes', (c) => {
+  const rows = db.prepare('SELECT id, details_json FROM disputes WHERE order_id=? ORDER BY updated_at DESC').all(c.req.param('id')) as Array<{ id: string; details_json: string }>;
+  return c.json(rows.map((row) => {
+    const detail = JSON.parse(row.details_json) as PayPalDispute & Record<string, any>;
+    const { plan } = planFor(detail);
+    return { dispute: { dispute_id: row.id, status: detail.status, reason: detail.reason ?? null, seller_response_due_date: detail.seller_response_due_date ?? null }, ...answerView(row.id, plan) };
+  }));
+});
+app.post('/api/demo/disputes/simulate', async (c) => {
+  if (!demoModeEnabled()) return c.json({ error: 'Dispute simulation is only available in sandbox demo mode.' }, 404);
+  const body = z.object({ orderId: z.string().min(1), kind: z.enum(['INR', 'SNAD']) }).safeParse(await c.req.json().catch(() => null));
+  if (!body.success) return c.json({ error: 'Send an orderId and kind INR or SNAD.' }, 400);
+  const order = getOrderRow(body.data.orderId);
+  if (!order?.capture_id) return c.json({ error: 'Only a paid order can be disputed.' }, 409);
+  const detail = demoDispute(body.data.kind, order.capture_id, order.id);
+  resetDemoDispute(detail);
+  storeDispute(detail, order.id);
+  try { await handleDispute(detail, { client: demoClient, auto: autoAnswerEnabled() || c.req.query('auto') === '1', source: 'Simulated fixture (not sent to PayPal)' }); }
+  catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Simulation failed', disputeId: detail.dispute_id }, 502); }
+  return c.json({ disputeId: detail.dispute_id });
 });
 app.post('/api/disputes/:id/draft', async (c) => {
   try {
@@ -406,39 +438,26 @@ app.post('/api/disputes/:id/draft', async (c) => {
   } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Evidence notes could not be drafted' }, 502); }
 });
 app.post('/api/disputes/:id/evidence', async (c) => {
-  const unavailable = requirePaypal(c); if (unavailable) return unavailable;
+  const id = c.req.param('id');
+  const demo = id.startsWith(DEMO_DISPUTE_PREFIX);
+  if (!demo) { const unavailable = requirePaypal(c); if (unavailable) return unavailable; }
+  if (demo && !demoModeEnabled()) return c.json({ error: 'Dispute simulation is only available in sandbox demo mode.' }, 404);
   const form = await c.req.formData();
   const notes = form.get('notes');
   if (typeof notes !== 'string' || !notes.trim()) return c.json({ error: 'Review and enter seller notes before submitting.' }, 400);
-  const id = c.req.param('id');
+  const client = demo ? demoClient : paypalDisputeClient;
   try {
-    const before = await paypal<any>(`/v1/customer/disputes/${encodeURIComponent(id)}`);
-    const evidenceType = (before.evidences ?? []).find((item: any) => item.evidence_type)?.evidence_type;
-    if (!evidenceType) return c.json({ error: 'PayPal did not return the evidence type required for this dispute.' }, 409);
-    const rows = db.prepare('SELECT * FROM orders').all() as unknown as StoredOrder[];
-    const order = matchDisputeToOrder(before, rows);
-    if (!order?.tracking_number || !order.carrier) return c.json({ error: 'The matched order has no stored carrier and tracking number.' }, 409);
-    if (!order.label_path || !existsSync(order.label_path)) return c.json({ error: 'The matched order has no stored label photo.' }, 409);
-    const requestKey = z.string().uuid().safeParse(form.get('requestKey'));
-    if (!requestKey.success) return c.json({ error: 'Missing evidence request key.' }, 400);
-    const operationId = `dispute-evidence:${id}:${requestKey.data}`;
-    const op = beginOperation(operationId, 'provide-dispute-evidence');
-    const multipart = new FormData();
-    multipart.append('input', new Blob([JSON.stringify({ evidences: [{ evidence_type: evidenceType, evidence_info: { tracking_info: [{ carrier_name: order.carrier, tracking_number: order.tracking_number }] }, notes: notes.trim() }] })], { type: 'application/json' }));
-    const labelType = extname(order.label_path).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
-    multipart.append('file1', new Blob([readFileSync(order.label_path)], { type: labelType }), `label${extname(order.label_path)}`);
-    if (!op.done) await paypal(`/v1/customer/disputes/${encodeURIComponent(id)}/provide-evidence`, { method: 'POST', body: multipart }, op.requestId);
-    const after = await paypal<any>(`/v1/customer/disputes/${encodeURIComponent(id)}`);
-    const evidenceChanged = JSON.stringify(after.evidences ?? []) !== JSON.stringify(before.evidences ?? []);
-    if (after.status === before.status && !evidenceChanged) throw new Error('PayPal read-back did not show a dispute status or evidence change');
-    finishOperation(operationId, id);
-    db.prepare(`INSERT INTO disputes(id,order_id,capture_id,status,reason,due_at,details_json,evidence_notes,evidence_submitted_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET status=excluded.status,details_json=excluded.details_json,evidence_notes=excluded.evidence_notes,evidence_submitted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP`)
-      .run(id, order.id, order.capture_id, after.status, after.reason ?? null, after.seller_response_due_date ?? null, JSON.stringify(after), notes.trim());
-    db.prepare("UPDATE orders SET protection_state='EVIDENCE SUBMITTED',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(order.id);
-    publish({ type: 'disputes', id });
+    const dispute = await client.read(id);
+    const { order, plan } = planFor(dispute);
+    if (!order) return c.json({ error: 'No stored order matches this dispute capture.' }, 404);
+    if (!plan.included.tracking) return c.json({ error: 'The matched order has no stored carrier and tracking number.' }, 409);
+    if (!plan.included.labelPhoto) return c.json({ error: 'The matched order has no stored label photo.' }, 409);
+    const after = await submitEvidence(id, order, plan, notes, client, 'manual');
     return c.json({ dispute: after, status: after.status });
-  } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Evidence submission failed' }, 502); }
+  } catch (error) {
+    if (error instanceof AlreadyAnswered) return c.json({ error: error.message }, 409);
+    return c.json({ error: error instanceof Error ? error.message : 'Evidence submission failed' }, 502);
+  }
 });
 
 app.post('/api/disputes/:id/sandbox/require-evidence', async (c) => sandboxDisputeAction(c.req.param('id'), 'require-evidence', { action: 'SELLER_EVIDENCE' }));
@@ -480,7 +499,7 @@ app.post('/api/webhooks/paypal', async (c) => {
   });
   if (verification.verification_status !== 'SUCCESS') return c.json({ error: 'PayPal webhook signature verification failed' }, 401);
   db.prepare('INSERT OR IGNORE INTO webhook_events(id,event_type) VALUES(?,?)').run(event.id, event.event_type ?? 'unknown');
-  if (event.event_type?.startsWith('CUSTOMER.DISPUTE.')) await reconcileDisputes();
+  if (event.event_type?.startsWith('CUSTOMER.DISPUTE.')) await reconcileDisputes('webhook');
   return c.json({ received: true });
 });
 
@@ -490,22 +509,21 @@ app.get('/api/labels/:id', async (c) => {
   return sendImage(c, order.label_path, c.req.query('w'), 'private, no-cache');
 });
 
-export async function reconcileDisputes() {
+export async function reconcileDisputes(source = 'poll') {
   const orders = db.prepare('SELECT * FROM orders').all() as unknown as StoredOrder[];
   for (let page = 1; page <= 50; page++) {
     const list = await paypal<any>(`/v1/customer/disputes?page_size=50&page=${page}`);
     for (const item of list.items ?? []) {
     const detail = await paypal<PayPalDispute & Record<string, any>>(`/v1/customer/disputes/${encodeURIComponent(item.dispute_id)}`);
     const order = matchDisputeToOrder(detail, orders);
-    db.prepare(`INSERT INTO disputes(id,order_id,capture_id,status,reason,due_at,details_json,updated_at)
-      VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET order_id=excluded.order_id,capture_id=excluded.capture_id,status=excluded.status,
-      reason=excluded.reason,due_at=excluded.due_at,details_json=excluded.details_json,updated_at=CURRENT_TIMESTAMP`)
-      .run(detail.dispute_id, order?.id ?? null, detail.disputed_transactions?.[0]?.seller_transaction_id ?? null, detail.status, detail.reason ?? null, detail.seller_response_due_date ?? null, JSON.stringify(detail));
+    storeDispute(detail, order?.id ?? null);
     if (order) {
       const local = db.prepare('SELECT evidence_submitted_at FROM disputes WHERE id=?').get(detail.dispute_id) as { evidence_submitted_at: string | null } | undefined;
       const state = /RESOLVED|CLOSED/i.test(detail.status) ? 'RESOLVED' : local?.evidence_submitted_at ? 'EVIDENCE SUBMITTED' : 'DISPUTED';
       db.prepare('UPDATE orders SET protection_state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(state, order.id);
     }
+    try { await handleDispute(detail, { source: source === 'webhook' ? 'PayPal webhook (signature verified)' : 'Disputes API poll' }); }
+    catch (error) { console.error('Dispute auto-answer failed', detail.dispute_id, error instanceof Error ? error.message : String(error)); }
     }
     const hasNext = (list.links ?? []).some((link: any) => link.rel === 'next');
     if (!hasNext) { publish({ type: 'disputes' }); return; }
