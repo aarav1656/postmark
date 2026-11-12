@@ -169,7 +169,7 @@ function EvidenceTile({ order, size }: { order: Order; size: 'row' | 'card' | 'f
   const verdict = order.verdict?.state as string | undefined;
   const stamp = verdict && <span className={`tile-stamp ${verdict === 'PROTECTED' ? 'tile-stamp-good' : 'tile-stamp-risk'}`}>{verdict}</span>;
   if (order.has_label) return <figure className={`evidence-tile evidence-tile-${size}`}>
-    <img src={labelUrl(order, size === 'full' ? 900 : size === 'card' ? 480 : 160)} alt={`Label photo for order ${order.id}`} loading="lazy" />{stamp}
+    <img src={labelUrl(order, size === 'full' ? 900 : size === 'card' ? 480 : 160)} alt={`Label photo for order ${order.id}`} />{stamp}
   </figure>;
   const read = order.extraction?.tracking_number as string | undefined;
   return <figure className={`evidence-tile evidence-tile-${size} evidence-tile-empty`} aria-label={`No label photo yet for order ${order.id}`}>
@@ -204,7 +204,7 @@ function ShopPage() {
     <div className="shop-layout">
       <section className="listing-shelf" aria-label="Your listings">
         {listings === null ? <div className="loading-panel" role="status">Loading listings…</div> : listings.length ? <ul className="listing-grid">{listings.map((listing) => <li key={listing.id}><a className="listing-card" href={`/item/${encodeURIComponent(listing.id)}`} onClick={(e) => { e.preventDefault(); nav(`/item/${encodeURIComponent(listing.id)}`); }}>
-          <img src={listingPhoto(listing.id, 640)} alt={listing.title} loading="lazy" />
+          <img src={listingPhoto(listing.id, 640)} alt={listing.title} />
           <span className="listing-card-body"><strong>{listing.title}</strong><span className="amount mono">{money(listing.price_cents, listing.currency)}</span><span className="listing-sold">{listing.sold_count ? `${listing.sold_count} paid ${listing.sold_count === 1 ? 'order' : 'orders'}` : 'No paid orders yet'}</span></span>
         </a></li>)}</ul> : <div className="empty-panel"><h3>List your first item to get a buyer page.</h3><p>Photograph something you will ship and set a price. Postmark publishes a page with a PayPal button.</p><button className="button button-secondary" onClick={() => document.getElementById('item-photo')?.click()}>Add the first photo</button></div>}
       </section>

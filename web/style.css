@@ -301,7 +301,7 @@ input[type="file"] { padding: 8px; font-size: 14px; }
 .evidence-tile-row { width: 56px; height: 56px; }
 .evidence-tile-card { width: 100%; aspect-ratio: 4 / 3; }
 .evidence-tile-full { width: 100%; aspect-ratio: 3 / 2; border-color: var(--color-ink); }
-.evidence-tile-full img { object-fit: contain; background: var(--color-label); padding: 8px; }
+.evidence-tile-card img, .evidence-tile-full img { object-fit: contain; background: var(--color-label); padding: 8px; }
 .evidence-tile-empty { display: grid; place-content: center; justify-items: center; gap: 4px; padding: 6px; border-style: dashed; background: repeating-linear-gradient(135deg, var(--color-paper) 0 10px, var(--color-paper-deep) 10px 20px); text-align: center; }
 .tile-number { color: var(--color-ink); font-size: 18px; font-weight: 600; letter-spacing: .04em; }
 .evidence-tile-card .tile-number, .evidence-tile-full .tile-number { font-size: 48px; line-height: 1; }
