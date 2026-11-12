@@ -46,6 +46,8 @@ The local server listens on port 8787. The first run creates `data/app.db`. Set 
 
 ## Deploy on Render
 
+Postmark also runs on Render at https://postmark-auv9.onrender.com, deployed from this repository as a Render web service.
+
 Create a Render web service from `render.yaml`, then set `APP_PASSWORD`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `OPENROUTER_API_KEY`, `DEMO_BUYER_EMAIL`, and `PUBLIC_URL` in the service environment. The blueprint builds the Vite app, starts the Hono server, and mounts persistent storage at `/var/data`.
 
 For live PayPal calls, set `PAYPAL_ENV=live` and use live credentials. Sandbox label generation and dispute controls are available only while `PAYPAL_ENV` is not `live`.
