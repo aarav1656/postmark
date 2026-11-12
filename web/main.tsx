@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
+import { deskSummary } from '../src/domain/board.ts';
 
 type Address = { address_line_1?: string; address_line_2?: string; city?: string; state?: string; postal_code?: string; country_code?: string };
 type Order = {
   id: string; capture_id: string | null; status: string; amount_cents: number; currency: string; buyer_name: string | null;
   protection_state: string; address: Address | null; extraction: any; verdict: any; tracker_id: string | null; has_label: boolean;
   tracking_number: string | null; carrier: string | null; tracker_posted_at: string | null;
+  listing_id: string | null; item_title: string | null; archived_at: string | null; updated_at: string;
 };
+type Listing = { id: string; title: string; description: string; price_cents: number; currency: string; created_at: string; sold_count?: number };
 type Dispute = { id: string; order_id: string | null; status: string; reason: string | null; due_at: string | null; details_json: string };
 
 const money = (cents: number, currency = 'USD') => new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(cents / 100);
@@ -27,6 +30,12 @@ function useRoute() {
   return path;
 }
 
+function Root() {
+  const route = useRoute();
+  const item = route.split('?')[0].match(/^\/item\/([^/]+)$/);
+  return item ? <BuyerPage id={decodeURIComponent(item[1])} /> : <App />;
+}
+
 function App() {
   const route = useRoute();
   const [authenticated, setAuthenticated] = useState(false);
@@ -36,7 +45,6 @@ function App() {
   const [disputes, setDisputes] = useState<Dispute[]>([]);
   const [setup, setSetup] = useState<{ missing: string[]; paypalEnv: string; demoBuyerEmail: string | null }>({ missing: [], paypalEnv: 'sandbox', demoBuyerEmail: null });
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -55,21 +63,8 @@ function App() {
     const source = new EventSource('/api/events'); source.addEventListener('update', () => void refresh()); return () => source.close();
   }, [refresh, authenticated]);
 
-  useEffect(() => { if (location.pathname === '/') nav('/orders'); document.title = `Postmark: ${route.includes('/disputes') ? 'dispute evidence' : route === '/shop' ? 'PayPal checkout' : route.includes('/orders/') ? 'shipment label check' : 'seller orders'}`; }, [route]);
+  useEffect(() => { if (location.pathname === '/') nav('/orders'); document.title = `Postmark: ${route.includes('/disputes') ? 'dispute evidence' : route === '/shop' ? 'listings' : route.includes('/orders/') ? 'shipment label check' : 'seller orders'}`; }, [route]);
 
-  useEffect(() => {
-    const url = new URL(location.href);
-    const token = url.searchParams.get('token');
-    if (location.pathname === '/shop' && token && url.searchParams.get('capture') === '1') {
-      setBusy(true);
-      api<Order>('/api/shop/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: token }) })
-        .then((order) => { nav(`/orders/${encodeURIComponent(order.id)}`); void refresh(); })
-        .catch((e) => setError(e instanceof Error ? e.message : 'Capture failed'))
-        .finally(() => setBusy(false));
-    }
-  }, [route, refresh]);
-
-  const atRiskCents = orders.filter((order) => order.protection_state === 'AT RISK' || order.protection_state === 'DISPUTED').reduce((sum, order) => sum + order.amount_cents, 0);
   const path = route.split('?')[0];
   const orderMatch = path.match(/^\/orders\/([^/]+)$/);
   const disputeMatch = path.match(/^\/disputes\/([^/]+)$/);
@@ -94,12 +89,11 @@ function App() {
     <main className="page-frame">
       {setup.missing.length > 0 && <SetupPanel missing={setup.missing} buyer={setup.demoBuyerEmail} />}
       {error && <div className="alert alert-danger" role="alert">{error}<button className="text-button" onClick={() => setError('')}>Dismiss</button></div>}
-      {path === '/shop' && <ShopPage busy={busy} setBusy={setBusy} setError={setError} />}
+      {path === '/shop' && <ShopPage />}
       {path === '/disputes' && <DisputesPage disputes={disputes} orders={orders} />}
       {disputeMatch && <DisputePage id={decodeURIComponent(disputeMatch[1])} setup={setup} setError={setError} />}
       {orderMatch && <OrderPage id={decodeURIComponent(orderMatch[1])} order={selectedOrder} setup={setup} setError={setError} refresh={refresh} />}
-      {path === '/orders' && <OrdersPage orders={orders} disputes={disputes} atRiskCents={atRiskCents} />}
-      {!['/shop', '/orders', '/disputes'].includes(path) && !orderMatch && !disputeMatch && <OrdersPage orders={orders} disputes={disputes} atRiskCents={atRiskCents} />}
+      {!['/shop', '/disputes'].includes(path) && !orderMatch && !disputeMatch && <OrdersPage orders={orders} disputes={disputes} />}
     </main>
     <footer className="footer"><span>Postmark</span><span>Check the label before the parcel leaves your hands.</span><a href="https://www.paypal.com/us/legalhub/paypal/seller-protection?locale.x=en_US" target="_blank" rel="noreferrer">PayPal Seller Protection policy</a></footer>
   </div>;
@@ -124,8 +118,10 @@ function SetupPanel({ missing, buyer }: { missing: string[]; buyer: string | nul
   </section>;
 }
 
-function OrdersPage({ orders, disputes, atRiskCents }: { orders: Order[]; disputes: Dispute[]; atRiskCents: number }) {
-  const [orderId, setOrderId] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+function OrdersPage({ orders: allOrders, disputes }: { orders: Order[]; disputes: Dispute[] }) {
+  const [orderId, setOrderId] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [showArchived, setShowArchived] = useState(false);
+  const summary = deskSummary(allOrders);
+  const orders = summary.active;
   const importOrder = async (event: React.FormEvent) => {
     event.preventDefault(); setBusy(true); setError('');
     try { const order = await api<Order>('/api/orders/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId }) }); nav(`/orders/${encodeURIComponent(order.id)}`); }
@@ -135,16 +131,16 @@ function OrdersPage({ orders, disputes, atRiskCents }: { orders: Order[]; disput
   const sorted = [...orders].sort((a, b) => rankState(a.protection_state) - rankState(b.protection_state));
   const urgent = sorted.find((order) => ['AT RISK', 'DISPUTED', 'UNSHIPPED'].includes(order.protection_state));
   return <>
-    <div className="page-heading"><div><p className="overline">Seller desk</p><h1>Orders</h1><p>Check the shipping address before tracking reaches PayPal.</p></div><button className="button button-primary" onClick={() => nav('/shop')}>Sell an item</button></div>
+    <div className="page-heading"><div><p className="overline">Seller desk</p><h1>Orders</h1><p>Check the shipping address before tracking reaches PayPal.</p></div><button className="button button-primary" onClick={() => nav('/shop')}>List an item</button></div>
     <section className="summary-strip" aria-label="Order summary">
       <div className="summary-item"><span>Orders in desk</span><strong className="summary-number">{orders.length}</strong></div>
-      <div className="summary-item"><span>Amount needing attention</span><strong className="summary-number mono">{money(atRiskCents)}</strong></div>
+      <div className={`summary-item ${summary.atRiskCents > 0 ? 'summary-risk' : ''}`}><span>Amount at risk</span><strong className="summary-number mono">{money(summary.atRiskCents)}</strong><small>{summary.unshipped} unshipped, {summary.atRisk} label {summary.atRisk === 1 ? 'mismatch' : 'mismatches'}</small></div>
       <div className="summary-item"><span>Disputes to review</span><strong className="summary-number">{disputes.length}</strong></div>
     </section>
     <div className="desk-grid">
       <section className="workbench">
         <div className="section-heading"><h2>{urgent ? 'Next parcel to check' : 'Shipping workbench'}</h2><span className="section-rule"></span></div>
-        {urgent ? <UrgentOrder order={urgent} /> : orders.length ? <div className="quiet-panel"><p className="stamp stamp-neutral">READY</p><h3>Every order is in the ledger.</h3><p>Open an order to add a label photo and run the address check before tracking.</p></div> : <div className="empty-panel"><div className="empty-mark" aria-hidden="true">P</div><h3>Your order desk is clear.</h3><p>Bring in a PayPal order or create a checkout link to start a shipment.</p><div className="button-row"><button className="button button-primary" onClick={() => nav('/shop')}>Sell an item</button><a className="button button-secondary" href="#import-order" onClick={(e) => { e.preventDefault(); document.getElementById('paypal-order-id')?.focus(); }}>Add PayPal order</a></div></div>}
+        {urgent ? <UrgentOrder order={urgent} /> : orders.length ? <div className="quiet-panel"><p className="stamp stamp-neutral">READY</p><h3>Every order is in the ledger.</h3><p>Open an order to add a label photo and run the address check before tracking.</p></div> : <div className="empty-panel"><div className="empty-mark" aria-hidden="true">P</div><h3>Your order desk is clear.</h3><p>Bring in a PayPal order or create a checkout link to start a shipment.</p><div className="button-row"><button className="button button-primary" onClick={() => nav('/shop')}>List an item</button><a className="button button-secondary" href="#import-order" onClick={(e) => { e.preventDefault(); document.getElementById('paypal-order-id')?.focus(); }}>Add PayPal order</a></div></div>}
         <form className="import-form" id="import-order" onSubmit={importOrder}>
           <div><label htmlFor="paypal-order-id">Add an existing PayPal order</label><p className="field-help">The order and its shipping address will be read from PayPal.</p></div>
           <div className="inline-form"><input id="paypal-order-id" value={orderId} onChange={(e) => setOrderId(e.target.value)} required aria-describedby="import-error" /><button className="button button-secondary" disabled={busy}>{busy ? 'Reading…' : 'Add order'}</button></div>
@@ -154,6 +150,10 @@ function OrdersPage({ orders, disputes, atRiskCents }: { orders: Order[]; disput
       <aside className="order-rail">
         <div className="section-heading"><h2>Order ledger</h2><span className="rail-total">{orders.length}</span></div>
         {orders.length ? <ul className="order-list">{sorted.map((order) => <li key={order.id}><OrderRow order={order} /></li>)}</ul> : <p className="rail-empty">Imported PayPal orders appear here with their amount and shipping state.</p>}
+        {summary.archived.length > 0 && <div className="archive-drawer">
+          <button className="text-button" aria-expanded={showArchived} onClick={() => setShowArchived(!showArchived)}>{showArchived ? 'Hide' : 'Show'} archived orders ({summary.archived.length})</button>
+          {showArchived && <ul className="order-list order-list-archived">{summary.archived.map((order) => <li key={order.id}><OrderRow order={order} /></li>)}</ul>}
+        </div>}
       </aside>
     </div>
   </>;
@@ -161,36 +161,104 @@ function OrdersPage({ orders, disputes, atRiskCents }: { orders: Order[]; disput
 
 function rankState(state: string) { return ({ 'AT RISK': 0, DISPUTED: 1, UNSHIPPED: 2, PROTECTED: 3, 'TRACKING ON PAYPAL': 4, 'EVIDENCE SUBMITTED': 5, RESOLVED: 6 } as Record<string, number>)[state] ?? 7; }
 function StatusBadge({ status }: { status: string }) { const kind = status === 'PROTECTED' || status === 'TRACKING ON PAYPAL' || status === 'EVIDENCE SUBMITTED' || status === 'RESOLVED' ? 'good' : status === 'AT RISK' || status === 'DISPUTED' ? 'bad' : 'neutral'; return <span className={`status-badge ${kind}`}>{status}</span>; }
-function OrderRow({ order }: { order: Order }) { return <a className="order-row" href={`/orders/${encodeURIComponent(order.id)}`} onClick={(e) => { e.preventDefault(); nav(`/orders/${encodeURIComponent(order.id)}`); }}>
-  <span className="order-row-main"><strong>{order.buyer_name || order.id}</strong><span className="order-id mono">{order.id}</span></span><span className="order-row-side"><span className="amount mono">{money(order.amount_cents, order.currency)}</span><StatusBadge status={order.protection_state} /></span>
+const destination = (address: Address | null) => address ? [address.city, address.state || address.country_code].filter(Boolean).join(', ') : '';
+const labelUrl = (order: Order, width?: number) => `/api/labels/${encodeURIComponent(order.id)}?v=${encodeURIComponent(order.updated_at)}${width ? `&w=${width}` : ''}`;
+const listingPhoto = (id: string, width: number) => `/api/public/listings/${encodeURIComponent(id)}/photo?w=${width}`;
+
+function EvidenceTile({ order, size }: { order: Order; size: 'row' | 'card' | 'full' }) {
+  const verdict = order.verdict?.state as string | undefined;
+  const stamp = verdict && <span className={`tile-stamp ${verdict === 'PROTECTED' ? 'tile-stamp-good' : 'tile-stamp-risk'}`}>{verdict}</span>;
+  if (order.has_label) return <figure className={`evidence-tile evidence-tile-${size}`}>
+    <img src={labelUrl(order, size === 'full' ? 900 : size === 'card' ? 480 : 160)} alt={`Label photo for order ${order.id}`} loading="lazy" />{stamp}
+  </figure>;
+  const read = order.extraction?.tracking_number as string | undefined;
+  return <figure className={`evidence-tile evidence-tile-${size} evidence-tile-empty`} aria-label={`No label photo yet for order ${order.id}`}>
+    <span className="tile-number mono">{order.id.slice(-4)}</span>
+    <span className="tile-caption">{read ? `Label read: ${read}` : 'No label photo'}</span>
+  </figure>;
+}
+function OrderRow({ order }: { order: Order }) { const place = destination(order.address); return <a className="order-row" href={`/orders/${encodeURIComponent(order.id)}`} onClick={(e) => { e.preventDefault(); nav(`/orders/${encodeURIComponent(order.id)}`); }}>
+  <EvidenceTile order={order} size="row" />
+  <span className="order-row-main"><strong>{order.buyer_name || 'Buyer not on PayPal order'}</strong><span className="order-place">{[place, order.item_title].filter(Boolean).join(' · ') || 'No shipping address from PayPal'}</span><span className="order-id mono">{order.id}</span></span><span className="order-row-side"><span className="amount mono">{money(order.amount_cents, order.currency)}</span><StatusBadge status={order.protection_state} /></span>
 </a>; }
 function UrgentOrder({ order }: { order: Order }) { return <a className="urgent-order" href={`/orders/${encodeURIComponent(order.id)}`} onClick={(e) => { e.preventDefault(); nav(`/orders/${encodeURIComponent(order.id)}`); }}>
-  <div className="urgent-order-head"><StatusBadge status={order.protection_state} /><span className="amount mono">{money(order.amount_cents, order.currency)}</span></div><h3>{order.buyer_name || 'PayPal order'}</h3><p className="mono">{order.id}</p><p>{order.address ? fullAddress(order.address) : 'Shipping address is added when PayPal capture completes.'}</p><span className="text-link">Open order <span aria-hidden="true">→</span></span>
+  {order.listing_id ? <img className="urgent-item" src={listingPhoto(order.listing_id, 480)} alt={order.item_title ?? 'Item in this order'} /> : <EvidenceTile order={order} size="card" />}
+  <div className="urgent-body"><div className="urgent-order-head"><StatusBadge status={order.protection_state} /><span className="amount mono">{money(order.amount_cents, order.currency)}</span></div><h3>{order.buyer_name || 'PayPal order'}</h3>{order.item_title && <p className="urgent-title">{order.item_title}</p>}<p className="mono">{order.id}</p><p>{order.address ? fullAddress(order.address) : 'Shipping address is added when PayPal capture completes.'}</p><span className="text-link">{order.has_label ? 'Review the label check' : 'Photograph the label'} <span aria-hidden="true">→</span></span></div>
 </a>; }
 
-function ShopPage({ busy, setBusy, setError }: { busy: boolean; setBusy: (value: boolean) => void; setError: (value: string) => void }) {
-  const [name, setName] = useState(''); const [price, setPrice] = useState(''); const [approvalUrl, setApprovalUrl] = useState(''); const [requestKey, setRequestKey] = useState(() => crypto.randomUUID());
+function ShopPage() {
+  const [listings, setListings] = useState<Listing[] | null>(null); const [photo, setPhoto] = useState<File | null>(null); const [preview, setPreview] = useState('');
+  const [title, setTitle] = useState(''); const [price, setPrice] = useState(''); const [description, setDescription] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const load = useCallback(() => api<Listing[]>('/api/listings').then(setListings).catch((e) => setError(e.message)), []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (!photo) { setPreview(''); return; } const url = URL.createObjectURL(photo); setPreview(url); return () => URL.revokeObjectURL(url); }, [photo]);
   const create = async (event: React.FormEvent) => {
-    event.preventDefault(); setBusy(true); setError('');
-    try {
-      const result = await api<{ approvalUrl: string }>('/api/shop/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, price, requestKey }) });
-      if (!result.approvalUrl) throw new Error('PayPal did not return an approval link.'); setApprovalUrl(result.approvalUrl); setRequestKey(crypto.randomUUID());
-    } catch (e) { setError(e instanceof Error ? e.message : 'Checkout could not be created'); }
+    event.preventDefault(); if (!photo) return; setBusy(true); setError('');
+    const form = new FormData(); form.append('photo', photo); form.append('title', title); form.append('price', price); form.append('description', description);
+    try { const listing = await api<Listing>('/api/listings', { method: 'POST', body: form }); setTitle(''); setPrice(''); setDescription(''); setPhoto(null); await load(); nav(`/item/${encodeURIComponent(listing.id)}`); }
+    catch (e) { setError(e instanceof Error ? e.message : 'The listing could not be saved'); }
     finally { setBusy(false); }
   };
   return <>
-    <div className="page-heading"><div><p className="overline">PayPal checkout</p><h1>Sell an item</h1><p>Create a PayPal checkout, then bring the captured shipment into the desk.</p></div></div>
+    <div className="page-heading"><div><p className="overline">Shop</p><h1>Listings</h1><p>Each listing gets a public page where a buyer pays with PayPal. Paid orders land in the desk with the buyer's PayPal address.</p></div></div>
     <div className="shop-layout">
+      <section className="listing-shelf" aria-label="Your listings">
+        {listings === null ? <div className="loading-panel" role="status">Loading listings…</div> : listings.length ? <ul className="listing-grid">{listings.map((listing) => <li key={listing.id}><a className="listing-card" href={`/item/${encodeURIComponent(listing.id)}`} onClick={(e) => { e.preventDefault(); nav(`/item/${encodeURIComponent(listing.id)}`); }}>
+          <img src={listingPhoto(listing.id, 640)} alt={listing.title} loading="lazy" />
+          <span className="listing-card-body"><strong>{listing.title}</strong><span className="amount mono">{money(listing.price_cents, listing.currency)}</span><span className="listing-sold">{listing.sold_count ? `${listing.sold_count} paid ${listing.sold_count === 1 ? 'order' : 'orders'}` : 'No paid orders yet'}</span></span>
+        </a></li>)}</ul> : <div className="empty-panel"><h3>List your first item to get a buyer page.</h3><p>Photograph something you will ship and set a price. Postmark publishes a page with a PayPal button.</p><button className="button button-secondary" onClick={() => document.getElementById('item-photo')?.click()}>Add the first photo</button></div>}
+      </section>
       <form className="paper-panel shop-form" onSubmit={create}>
-        <h2>Item for sale</h2><label htmlFor="item-name">Item name</label><input id="item-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} required />
+        <h2>List an item</h2>
+        <label htmlFor="item-photo" className={`photo-drop ${preview ? 'has-photo' : ''}`}>{preview ? <img src={preview} alt="Selected item photo" /> : <span><strong>Add a photo</strong><span>JPEG, PNG or WebP, under 15 MB</span></span>}</label>
+        <input id="item-photo" className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setPhoto(e.target.files?.[0] ?? null)} required />
+        <label htmlFor="item-title">Title</label><input id="item-title" value={title} onChange={(e) => setTitle(e.target.value)} minLength={3} maxLength={120} required />
         <label htmlFor="item-price">Price in USD</label><div className="money-input"><span aria-hidden="true">$</span><input id="item-price" inputMode="decimal" pattern="\d+(\.\d{1,2})?" value={price} onChange={(e) => setPrice(e.target.value)} required /></div>
-        <p className="field-help">PayPal collects the buyer’s shipping address during checkout.</p>
-        <button className="button button-primary" disabled={busy}>{busy ? 'Creating checkout…' : 'Continue with PayPal'}</button>
-        {approvalUrl && <div className="approval-card"><p className="overline">PayPal approval</p><p>Open PayPal to approve the order. Postmark will capture it when PayPal returns you here.</p><a className="button button-secondary" href={approvalUrl}>Open PayPal checkout</a></div>}
+        <label htmlFor="item-description">Description</label><textarea id="item-description" rows={4} value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} required />
+        {error && <p className="field-error" role="alert">{error}</p>}
+        <button className="button button-primary" disabled={busy || !photo}>{busy ? 'Saving listing…' : 'Publish listing'}</button>
+        <p className="field-help">PayPal collects the buyer's shipping address at checkout. Postmark checks your label against it before tracking goes to PayPal.</p>
       </form>
-      <aside className="shop-note"><p className="overline">What happens next</p><h2>Capture first. Check the label before tracking.</h2><ol><li>PayPal collects the buyer’s delivery address.</li><li>Postmark stores the captured order and amount.</li><li>Upload the printed label before adding tracking.</li></ol><p className="policy-note">Postmark checks the two proof-of-delivery requirements in PayPal's Seller Protection policy: an online, verifiable tracking number and a recipient address that matches PayPal Transaction Details. <a href="https://www.paypal.com/us/legalhub/paypal/seller-protection?locale.x=en_US" target="_blank" rel="noreferrer">Read PayPal’s policy.</a></p></aside>
     </div>
   </>;
+}
+
+function BuyerPage({ id }: { id: string }) {
+  const [listing, setListing] = useState<Listing | null>(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [paid, setPaid] = useState<string | null>(null);
+  const [requestKey] = useState(() => crypto.randomUUID());
+  useEffect(() => { api<Listing>(`/api/public/listings/${encodeURIComponent(id)}`).then((value) => { setListing(value); document.title = `${value.title}: buy with PayPal`; }).catch((e) => setError(e.message)); }, [id]);
+  useEffect(() => {
+    const url = new URL(location.href); const token = url.searchParams.get('token');
+    if (url.searchParams.get('cancelled') === '1') setError('Checkout was cancelled. Nothing was charged.');
+    if (!token || url.searchParams.get('capture') !== '1') return;
+    setBusy(true);
+    api<{ id: string; status: string }>(`/api/public/listings/${encodeURIComponent(id)}/capture`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: token }) })
+      .then((order) => { setPaid(order.id); history.replaceState({}, '', `/item/${encodeURIComponent(id)}`); })
+      .catch((e) => setError(e instanceof Error ? e.message : 'Payment could not be completed'))
+      .finally(() => setBusy(false));
+  }, [id]);
+  const buy = async () => {
+    setBusy(true); setError('');
+    try { const result = await api<{ approvalUrl?: string }>(`/api/public/listings/${encodeURIComponent(id)}/checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestKey }) }); if (!result.approvalUrl) throw new Error('PayPal did not return a checkout link.'); location.href = result.approvalUrl; }
+    catch (e) { setError(e instanceof Error ? e.message : 'Checkout could not start'); setBusy(false); }
+  };
+  return <div className="app-shell buyer-shell">
+    <header className="buyer-bar"><span className="brand"><span className="brand-mark" aria-hidden="true">P</span><span>postmark</span></span><span className="buyer-bar-note">Paid with PayPal. Shipped to the address on your PayPal order.</span></header>
+    <main className="page-frame buyer-frame">
+      {!listing ? (error ? <div className="alert" role="alert">{error}</div> : <div className="loading-panel" role="status">Loading item…</div>) : <article className="buyer-item">
+        <figure className="buyer-photo"><img src={listingPhoto(listing.id, 1400)} alt={listing.title} /></figure>
+        <div className="buyer-copy">
+          <p className="overline">For sale</p><h1>{listing.title}</h1>
+          <p className="buyer-price mono">{money(listing.price_cents, listing.currency)}</p>
+          <p className="buyer-description">{listing.description}</p>
+          {error && <p className="field-error" role="alert">{error}</p>}
+          {paid ? <div className="buyer-receipt" role="status"><span className="verdict-stamp" data-verdict="PAID">PAID</span><div><strong>PayPal confirmed your payment.</strong><span className="mono">Order {paid}</span><span>The seller ships to the address on your PayPal order.</span></div></div>
+            : <button className="button button-paypal" disabled={busy} onClick={() => void buy()}>{busy ? 'Opening PayPal…' : 'Buy with PayPal'}</button>}
+          <dl className="buyer-facts"><div><dt>Ships to</dt><dd>The address you confirm in PayPal</dd></div><div><dt>Payment</dt><dd>PayPal checkout, captured on return</dd></div></dl>
+        </div>
+      </article>}
+    </main>
+  </div>;
 }
 
 function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string; order?: Order; setup: { missing: string[]; paypalEnv: string }; setError: (value: string) => void; refresh: () => Promise<void> }) {
@@ -210,12 +278,18 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
     catch (e) { setError(e instanceof Error ? e.message : 'Tracking was not posted'); }
     finally { setBusy(false); }
   };
+  const archive = async (archived: boolean) => {
+    setBusy(true); setError('');
+    try { setOrder(await api<Order>(`/api/orders/${encodeURIComponent(id)}/archive`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archived }) })); await refresh(); if (archived) nav('/orders'); }
+    catch (e) { setError(e instanceof Error ? e.message : 'The order could not be archived'); }
+    finally { setBusy(false); }
+  };
   if (!order) return <div className="loading-panel" role="status">Loading PayPal order…</div>;
   const address = order.address;
   const protectedPass = order.verdict?.state === 'PROTECTED';
   return <>
     <div className="breadcrumb"><a href="/orders" onClick={(e) => { e.preventDefault(); nav('/orders'); }}>Orders</a><span aria-hidden="true">/</span><span className="mono">{order.id}</span></div>
-    <div className="page-heading"><div><p className="overline">Shipment file</p><h1>{order.buyer_name || 'PayPal order'}</h1><p className="mono">{order.id} <span className="copy-divider">·</span> {money(order.amount_cents, order.currency)}</p></div>{!order.verdict && <StatusBadge status={order.protection_state} />}</div>
+    <div className="page-heading"><div><p className="overline">Shipment file</p><h1>{order.buyer_name || 'PayPal order'}</h1><p className="mono">{[order.item_title, order.id].filter(Boolean).join(' · ')} <span className="copy-divider">·</span> {money(order.amount_cents, order.currency)}{order.archived_at ? ' · archived' : ''}</p></div>{!order.verdict && <StatusBadge status={order.protection_state} />}</div>
     {notice && <p className={`notice-line ${order.verdict?.state === 'AT RISK' ? 'notice-risk' : 'notice-good'}`} role="status">{notice}</p>}
     <div className="order-detail-grid">
       <section className="workbench">
@@ -233,7 +307,6 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
           <div className="extraction-fields"><div><span>Carrier</span><strong>{order.extraction.carrier}{order.extraction.service ? ` · ${order.extraction.service}` : ''}</strong></div><div><span>Tracking number</span><strong className="mono">{order.extraction.tracking_number}</strong></div><div><span>Recipient</span><strong>{order.extraction.recipient_name || 'Unreadable on this label' }</strong></div><div><span>Address from label</span><strong>{fullAddress({ address_line_1: order.extraction.address_line_1, address_line_2: order.extraction.address_line_2, city: order.extraction.city, state: order.extraction.state, postal_code: order.extraction.postal_code, country_code: order.extraction.country })}</strong></div></div>
           <p className="field-help">Signature confirmation visible: {order.extraction.signature_confirmation_visible ? 'Yes' : 'No'}</p>
         </div>}
-        {order.has_label && <figure className="label-figure"><img src={`/api/labels/${encodeURIComponent(order.id)}`} alt="Stored shipping label photo" /><figcaption>Stored label evidence.</figcaption></figure>}
         <form className="upload-panel" onSubmit={runLabel}>
           <label htmlFor="label-photo" className="upload-title">{order.verdict?.state === 'AT RISK' ? 'Check a replacement label' : 'Photograph the printed label'}</label>
           <p className="field-help">The photo is read for recipient, address, carrier, and tracking. Use a clear, flat image.</p>
@@ -241,9 +314,14 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
         </form>
       </section>
       <aside className="address-rail">
-        <div className="section-heading"><h2>PayPal order address</h2></div>
+        <div className="section-heading"><h2>Label evidence</h2></div>
+        <EvidenceTile order={order} size="full" />
+        <p className="evidence-caption">{order.has_label ? `Stored label photo${order.extraction ? `, read at ${Math.round(order.extraction.confidence * 100)}% confidence` : ''}. This photo is attached to any PayPal dispute on this order.` : 'Photograph the printed label. The photo is kept as proof of shipment and attached to any PayPal dispute.'}</p>
+        {order.listing_id && <a className="item-chip" href={`/item/${encodeURIComponent(order.listing_id)}`} onClick={(e) => { e.preventDefault(); nav(`/item/${encodeURIComponent(order.listing_id!)}`); }}><img src={listingPhoto(order.listing_id, 160)} alt="" /><span><span className="overline">Item sold</span><strong>{order.item_title}</strong></span></a>}
+        <div className="section-heading rail-gap"><h2>PayPal order address</h2></div>
         <div className="address-stock"><p className="address-label">Ship to</p><strong>{order.buyer_name || order.id}</strong><address>{addressLines(address).map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}</address><span className="address-source">Read from PayPal Transaction Details</span></div>
         {setup.paypalEnv !== 'live' && !setup.missing.includes('PAYPAL_CLIENT_ID') && !setup.missing.includes('PAYPAL_CLIENT_SECRET') && address && <div className="sandbox-card"><p className="overline">Sandbox only</p><h3>Print a test label</h3><p>Uses this PayPal address with a clearly marked test tracking number.</p><div className="stack-buttons"><a className="button button-secondary" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label`}>Print matching label</a><a className="quiet-link" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label?wrongUnit=1`}>Print label with a wrong unit</a></div></div>}
+        <div className="archive-control"><button className="button button-quiet" disabled={busy} onClick={() => void archive(!order.archived_at)}>{order.archived_at ? 'Restore to the desk' : 'Archive this order'}</button><p className="field-help">{order.archived_at ? 'Archived orders stay out of the desk and its totals.' : 'Archiving hides the order from the desk and its totals. PayPal keeps the order.'}</p></div>
       </aside>
     </div>
   </>;
@@ -296,4 +374,4 @@ function DisputePage({ id, setup, setError }: { id: string; setup: { paypalEnv: 
   </>;
 }
 
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+createRoot(document.getElementById('root')!).render(<React.StrictMode><Root /></React.StrictMode>);
