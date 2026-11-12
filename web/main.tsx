@@ -130,6 +130,7 @@ function OrdersPage({ orders: allOrders, disputes }: { orders: Order[]; disputes
   };
   const sorted = [...orders].sort((a, b) => rankState(a.protection_state) - rankState(b.protection_state));
   const urgent = sorted.find((order) => ['AT RISK', 'DISPUTED', 'UNSHIPPED'].includes(order.protection_state));
+  const cleared = [...orders].filter((order) => order.has_label).sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
   return <>
     <div className="page-heading"><div><p className="overline">Seller desk</p><h1>Orders</h1><p>Check the shipping address before tracking reaches PayPal.</p></div><button className="button button-primary" onClick={() => nav('/shop')}>List an item</button></div>
     <section className="summary-strip" aria-label="Order summary">
@@ -139,8 +140,8 @@ function OrdersPage({ orders: allOrders, disputes }: { orders: Order[]; disputes
     </section>
     <div className="desk-grid">
       <section className="workbench">
-        <div className="section-heading"><h2>{urgent ? 'Next parcel to check' : 'Shipping workbench'}</h2><span className="section-rule"></span></div>
-        {urgent ? <UrgentOrder order={urgent} /> : orders.length ? <div className="quiet-panel"><p className="stamp stamp-neutral">READY</p><h3>Every order is in the ledger.</h3><p>Open an order to add a label photo and run the address check before tracking.</p></div> : <div className="empty-panel"><div className="empty-mark" aria-hidden="true">P</div><h3>Your order desk is clear.</h3><p>Bring in a PayPal order or create a checkout link to start a shipment.</p><div className="button-row"><button className="button button-primary" onClick={() => nav('/shop')}>List an item</button><a className="button button-secondary" href="#import-order" onClick={(e) => { e.preventDefault(); document.getElementById('paypal-order-id')?.focus(); }}>Add PayPal order</a></div></div>}
+        <div className="section-heading"><h2>{urgent ? 'Next parcel to check' : cleared ? 'Last parcel cleared' : 'Shipping workbench'}</h2><span className="section-rule"></span></div>
+        {urgent ? <UrgentOrder order={urgent} /> : cleared ? <UrgentOrder order={cleared} /> : orders.length ? <div className="quiet-panel"><p className="stamp stamp-neutral">READY</p><h3>Every order is in the ledger.</h3><p>Open an order to add a label photo and run the address check before tracking.</p></div> : <div className="empty-panel"><div className="empty-mark" aria-hidden="true">P</div><h3>Your order desk is clear.</h3><p>Bring in a PayPal order or create a checkout link to start a shipment.</p><div className="button-row"><button className="button button-primary" onClick={() => nav('/shop')}>List an item</button><a className="button button-secondary" href="#import-order" onClick={(e) => { e.preventDefault(); document.getElementById('paypal-order-id')?.focus(); }}>Add PayPal order</a></div></div>}
         <form className="import-form" id="import-order" onSubmit={importOrder}>
           <div><label htmlFor="paypal-order-id">Add an existing PayPal order</label><p className="field-help">The order and its shipping address will be read from PayPal.</p></div>
           <div className="inline-form"><input id="paypal-order-id" value={orderId} onChange={(e) => setOrderId(e.target.value)} required aria-describedby="import-error" /><button className="button button-secondary" disabled={busy}>{busy ? 'Reading…' : 'Add order'}</button></div>
@@ -181,7 +182,7 @@ function OrderRow({ order }: { order: Order }) { const place = destination(order
   <EvidenceTile order={order} size="row" />
   <span className="order-row-main"><strong>{order.buyer_name || 'Buyer not on PayPal order'}</strong><span className="order-place">{[place, order.item_title].filter(Boolean).join(' · ') || 'No shipping address from PayPal'}</span><span className="order-id mono">{order.id}</span></span><span className="order-row-side"><span className="amount mono">{money(order.amount_cents, order.currency)}</span><StatusBadge status={order.protection_state} /></span>
 </a>; }
-function UrgentOrder({ order }: { order: Order }) { return <a className="urgent-order" href={`/orders/${encodeURIComponent(order.id)}`} onClick={(e) => { e.preventDefault(); nav(`/orders/${encodeURIComponent(order.id)}`); }}>
+function UrgentOrder({ order }: { order: Order }) { return <a className={`urgent-order ${order.verdict?.state === 'PROTECTED' ? 'urgent-order-clear' : ''}`} href={`/orders/${encodeURIComponent(order.id)}`} onClick={(e) => { e.preventDefault(); nav(`/orders/${encodeURIComponent(order.id)}`); }}>
   {order.listing_id ? <img className="urgent-item" src={listingPhoto(order.listing_id, 480)} alt={order.item_title ?? 'Item in this order'} /> : <EvidenceTile order={order} size="card" />}
   <div className="urgent-body"><div className="urgent-order-head"><StatusBadge status={order.protection_state} /><span className="amount mono">{money(order.amount_cents, order.currency)}</span></div><h3>{order.buyer_name || 'PayPal order'}</h3>{order.item_title && <p className="urgent-title">{order.item_title}</p>}<p className="mono">{order.id}</p><p>{order.address ? fullAddress(order.address) : 'Shipping address is added when PayPal capture completes.'}</p><span className="text-link">{order.has_label ? 'Review the label check' : 'Photograph the label'} <span aria-hidden="true">→</span></span></div>
 </a>; }
