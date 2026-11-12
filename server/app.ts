@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
@@ -146,12 +146,31 @@ app.post('/api/session', async (c) => {
   c.header('Set-Cookie', createSessionCookie(password, secureCookie()));
   return c.json({ authenticated: true });
 });
-app.post('/api/session/judge', (c) => {
+// The judge lands on the newest paid order that still needs a label check. DEMO_ORDER_ID (a real sandbox
+// order id) is read from PayPal once if it is not on the desk yet; nothing is invented.
+const nextJudgeOrder = () => (db.prepare(`SELECT id FROM orders WHERE archived_at IS NULL AND address_json IS NOT NULL AND tracker_id IS NULL
+  AND protection_state IN ('UNSHIPPED','AT RISK') ORDER BY CASE protection_state WHEN 'UNSHIPPED' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`).get() as { id: string } | undefined)?.id ?? null;
+app.post('/api/session/judge', async (c) => {
   if (!demoModeEnabled()) return c.json({ error: 'Judge entry is not enabled on this Postmark instance.' }, 404);
+  const demoOrderId = process.env.DEMO_ORDER_ID;
+  if (demoOrderId && !getOrder(demoOrderId) && process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET) {
+    try { savePaypalOrder(await getPaypalOrder(demoOrderId)); } catch { /* the desk still opens; the order can be added by id */ }
+  }
   c.header('Set-Cookie', createSessionCookie(process.env.APP_PASSWORD!, secureCookie()));
-  return c.json({ authenticated: true, judge: true });
+  return c.json({ authenticated: true, judge: true, next: nextJudgeOrder() });
 });
+const demoPhoto = new URL('./demo/agfa-box-45.jpg', import.meta.url);
+const ensureDemoListing = () => {
+  if (!demoModeEnabled()) return;
+  if ((db.prepare('SELECT COUNT(*) AS n FROM listings').get() as { n: number }).n > 0) return;
+  const id = randomUUID();
+  const photoPath = join(listingsDir, `${id}.jpg`);
+  copyFileSync(demoPhoto, photoPath);
+  db.prepare('INSERT INTO listings (id,title,description,price_cents,currency,photo_path) VALUES (?,?,?,?,?,?)').run(
+    id, 'Agfa Box 45 camera', 'Pre-war box camera in black leatherette. Shutter fires, viewfinder clear. Ships boxed. Sandbox demo listing: pay with a PayPal sandbox account.', 4200, 'USD', photoPath);
+};
 app.get('/api/public/entry', (c) => {
+  ensureDemoListing();
   const pinned = process.env.DEMO_LISTING_ID ? getListing(process.env.DEMO_LISTING_ID) : undefined;
   const listing = pinned ?? (db.prepare('SELECT * FROM listings ORDER BY created_at DESC, rowid DESC LIMIT 1').get() as ReturnType<typeof getListing>);
   return c.json({

@@ -30,7 +30,7 @@ function useEntry() {
   useEffect(() => { void api<Entry>('/api/public/entry').then(setEntry).catch(() => setEntry({ demoMode: false, judgePassword: false, paypalEnv: 'sandbox', demoBuyerEmail: null, demoListing: null })); }, []);
   return entry;
 }
-const enterAsJudge = async () => { await api('/api/session/judge', { method: 'POST' }); location.assign('/orders'); };
+const enterAsJudge = async () => { const result = await api<{ next: string | null }>('/api/session/judge', { method: 'POST' }); location.assign(result.next ? `/orders/${encodeURIComponent(result.next)}` : '/orders'); };
 const REPO_URL = 'https://github.com/aarav1656/postmark';
 
 function useRoute() {
