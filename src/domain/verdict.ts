@@ -17,6 +17,10 @@ export interface PreflightVerdict {
 }
 export const SELLER_PROTECTION_URL = 'https://www.paypal.com/us/legalhub/paypal/seller-protection?locale.x=en_US';
 
+export function protectionStateAfterLabel(state: PreflightVerdict['state'], trackerId: string | null) {
+  return state === 'PROTECTED' && trackerId ? 'TRACKING ON PAYPAL' : state;
+}
+
 export function preflight(input: PreflightInput): PreflightVerdict {
   const addressDifferences = compareAddresses(input.paypalAddress, input.labelAddress);
   const trackingValid = isValidTrackingNumber(input.carrier as Carrier, input.trackingNumber);

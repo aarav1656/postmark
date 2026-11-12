@@ -10,7 +10,7 @@ import { publish, subscribe } from './events.ts';
 import { clearSessionCookie, createSessionCookie, hasSession } from './session.ts';
 import { compareAddresses, type ShippingAddress } from '../src/domain/address.ts';
 import { matchDisputeToOrder, assembleEvidencePacket, type PayPalDispute, type StoredOrder } from '../src/domain/dispute.ts';
-import { preflight } from '../src/domain/verdict.ts';
+import { preflight, protectionStateAfterLabel } from '../src/domain/verdict.ts';
 import { extractLabel } from '../src/ai/label.ts';
 import { draftDisputeNotes } from '../src/ai/notes.ts';
 import { beginOperation, failOperation, finishOperation, paypal } from '../src/paypal.ts';
@@ -215,8 +215,9 @@ app.post('/api/orders/:id/label', async (c) => {
     city: extraction.city, state: extraction.state, postal_code: extraction.postal_code, country_code: extraction.country,
   };
   const verdict = preflight({ paypalAddress: order.address, labelAddress, carrier: extraction.carrier, trackingNumber: extraction.tracking_number });
+  const protectionState = protectionStateAfterLabel(verdict.state, order.tracker_id ?? null);
   db.prepare(`UPDATE orders SET extraction_json=?,verdict_json=?,tracking_number=?,carrier=?,protection_state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .run(JSON.stringify(extraction), JSON.stringify(verdict), extraction.tracking_number, extraction.carrier, verdict.state, orderId);
+    .run(JSON.stringify(extraction), JSON.stringify(verdict), extraction.tracking_number, extraction.carrier, protectionState, orderId);
   publish({ type: 'orders', id: orderId });
   return c.json({ extraction, verdict, order: publicOrder(orderId) });
 });

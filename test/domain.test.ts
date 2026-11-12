@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { compareAddresses } from '../src/domain/address.ts';
 import { assembleEvidencePacket, matchDisputeToOrder } from '../src/domain/dispute.ts';
-import { preflight } from '../src/domain/verdict.ts';
+import { preflight, protectionStateAfterLabel } from '../src/domain/verdict.ts';
 import { isValidTrackingNumber } from '../src/domain/tracking.ts';
 import { sandboxLabelSvg } from '../src/domain/sandbox-label.ts';
 
@@ -58,6 +58,18 @@ describe('preflight verdict', () => {
     expect(result.state).toBe('AT RISK');
     expect(result.addressDifferences.map((d) => d.field)).toContain('unit');
     expect(result.reasons).toHaveLength(2);
+  });
+});
+
+describe('protection state after a label recheck', () => {
+  it('keeps a posted tracker visible after a matching label is checked again', () => {
+    expect(protectionStateAfterLabel('PROTECTED', 'CAP-1-TRACK-1')).toBe('TRACKING ON PAYPAL');
+  });
+  it('shows PROTECTED until tracking exists', () => {
+    expect(protectionStateAfterLabel('PROTECTED', null)).toBe('PROTECTED');
+  });
+  it('keeps a label mismatch at risk even when a tracker was already posted', () => {
+    expect(protectionStateAfterLabel('AT RISK', 'CAP-1-TRACK-1')).toBe('AT RISK');
   });
 });
 

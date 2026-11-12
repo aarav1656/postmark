@@ -10,6 +10,7 @@ export interface PayPalDispute {
 export interface StoredOrder {
   id: string;
   capture_id: string | null;
+  tracker_id?: string | null;
   tracking_number: string | null;
   carrier: string | null;
   tracker_posted_at: string | null;
