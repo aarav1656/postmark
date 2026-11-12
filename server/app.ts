@@ -190,7 +190,7 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 
-app.get('/api/setup', (c) => c.json({ missing: missingEnv(), paypalEnv: process.env.PAYPAL_ENV || 'sandbox', demoBuyerEmail: process.env.DEMO_BUYER_EMAIL || null }));
+app.get('/api/setup', (c) => c.json({ missing: missingEnv(), paypalEnv: process.env.PAYPAL_ENV || 'sandbox', demoBuyerEmail: process.env.DEMO_BUYER_EMAIL || null, demoMode: demoModeEnabled(), disputeAutoAnswer: autoAnswerEnabled() }));
 
 app.get('/api/events', (c) => streamSSE(c, async (stream) => {
   const queue: unknown[] = [];
@@ -423,7 +423,7 @@ app.post('/api/demo/disputes/simulate', async (c) => {
   const detail = demoDispute(body.data.kind, order.capture_id, order.id);
   resetDemoDispute(detail);
   storeDispute(detail, order.id);
-  try { await handleDispute(detail, { client: demoClient, auto: autoAnswerEnabled() || c.req.query('auto') === '1', source: 'Simulated fixture (not sent to PayPal)' }); }
+  try { await handleDispute(detail, { client: demoClient, auto: autoAnswerEnabled() || c.req.query('auto') === '1', source: 'simulated fixture' }); }
   catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Simulation failed', disputeId: detail.dispute_id }, 502); }
   return c.json({ disputeId: detail.dispute_id });
 });

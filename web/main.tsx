@@ -11,6 +11,7 @@ type Order = {
   listing_id: string | null; item_title: string | null; archived_at: string | null; updated_at: string;
 };
 type Listing = { id: string; title: string; description: string; price_cents: number; currency: string; created_at: string; sold_count?: number };
+type Setup = { missing: string[]; paypalEnv: string; demoBuyerEmail: string | null; demoMode?: boolean; disputeAutoAnswer?: boolean };
 type Entry = { demoMode: boolean; judgePassword: boolean; paypalEnv: string; demoBuyerEmail: string | null; demoListing: Listing | null };
 type Dispute = { id: string; order_id: string | null; status: string; reason: string | null; due_at: string | null; details_json: string };
 
@@ -55,7 +56,7 @@ function App() {
   const [authError, setAuthError] = useState('');
   const [orders, setOrders] = useState<Order[]>([]);
   const [disputes, setDisputes] = useState<Dispute[]>([]);
-  const [setup, setSetup] = useState<{ missing: string[]; paypalEnv: string; demoBuyerEmail: string | null }>({ missing: [], paypalEnv: 'sandbox', demoBuyerEmail: null });
+  const [setup, setSetup] = useState<Setup>({ missing: [], paypalEnv: 'sandbox', demoBuyerEmail: null, demoMode: false, disputeAutoAnswer: false });
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
@@ -372,7 +373,7 @@ function MissingItem({ message }: { message: string }) {
     <div className="button-row">{other && <a className="button button-primary" href={`/item/${encodeURIComponent(other.id)}`} onClick={(e) => { e.preventDefault(); nav(`/item/${encodeURIComponent(other.id)}`); }}>Open the demo item</a>}<a className="button button-secondary" href="/" onClick={(e) => { e.preventDefault(); nav('/'); }}>Home page</a></div></div>;
 }
 
-function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string; order?: Order; setup: { missing: string[]; paypalEnv: string }; setError: (value: string) => void; refresh: () => Promise<void> }) {
+function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string; order?: Order; setup: Setup; setError: (value: string) => void; refresh: () => Promise<void> }) {
   const [order, setOrder] = useState<Order | undefined>(cached); const [file, setFile] = useState<File | null>(null); const [busy, setBusy] = useState(false); const [acceptRisk, setAcceptRisk] = useState(false); const [notice, setNotice] = useState('');
   useEffect(() => { setOrder(cached); }, [cached]);
   useEffect(() => { if (!cached) api<Order>(`/api/orders/${encodeURIComponent(id)}`).then(setOrder).catch((e) => setError(e.message)); }, [cached, id, setError]);
@@ -444,6 +445,7 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
         <div className="archive-control"><button className="button button-quiet" disabled={busy} onClick={() => void archive(!order.archived_at)}>{order.archived_at ? 'Restore to the desk' : 'Archive this order'}</button><p className="field-help">{order.archived_at ? 'Archived orders stay out of the desk and its totals.' : 'Archiving hides the order from the desk and its totals. PayPal keeps the order.'}</p></div>
       </aside>
     </div>
+    <OrderDisputes order={order} setup={setup} setError={setError} />
   </>;
 }
 
@@ -490,33 +492,97 @@ function DisputesPage({ disputes, orders }: { disputes: Dispute[]; orders: Order
   return <>
     <div className="page-heading"><div><p className="overline">PayPal Resolution Center</p><h1>Disputes</h1><p>Matched disputes include the shipment proof Postmark already has on file.</p></div></div>
     <section className="disputes-shell">
-      {disputes.length ? <ul className="dispute-list">{disputes.map((dispute) => <li key={dispute.id}><a className="dispute-row" href={`/disputes/${encodeURIComponent(dispute.id)}`} onClick={(e) => { e.preventDefault(); nav(`/disputes/${encodeURIComponent(dispute.id)}`); }}><span><strong>{dispute.reason || 'Seller response requested'}</strong><span className="mono">{dispute.id}</span></span><span><StatusBadge status={dispute.status} /><span className="due-date">{dispute.due_at ? new Date(dispute.due_at).toLocaleDateString() : 'No due date returned'}</span></span><span className="dispute-match">{dispute.order_id && orderById.has(dispute.order_id) ? 'Order evidence matched' : 'Add the matching PayPal order to link shipment evidence'}</span></a></li>)}</ul> : <div className="empty-panel"><h2>Your seller dispute queue is clear.</h2><p>Postmark refreshes PayPal’s required-action disputes every 30 seconds.</p></div>}
+      {disputes.length ? <ul className="dispute-list">{disputes.map((dispute) => <li key={dispute.id}><a className="dispute-row" href={`/disputes/${encodeURIComponent(dispute.id)}`} onClick={(e) => { e.preventDefault(); nav(`/disputes/${encodeURIComponent(dispute.id)}`); }}><span><strong>{reasonLabel(dispute.reason)}</strong><span className="mono">{dispute.id}</span></span><span><StatusBadge status={dispute.status} /><span className="due-date">{dispute.due_at ? new Date(dispute.due_at).toLocaleDateString() : 'No due date returned'}</span></span><span className="dispute-match">{dispute.order_id && orderById.has(dispute.order_id) ? 'Order evidence matched' : 'Add the matching PayPal order to link shipment evidence'}</span></a></li>)}</ul> : <div className="empty-panel"><h2>Your seller dispute queue is clear.</h2><p>Postmark refreshes PayPal’s required-action disputes every 30 seconds.</p></div>}
     </section>
   </>;
 }
 
-function DisputePage({ id, setup, setError }: { id: string; setup: { paypalEnv: string }; setError: (value: string) => void }) {
-  const [data, setData] = useState<any>(null); const [notes, setNotes] = useState(''); const [busy, setBusy] = useState(false); const [message, setMessage] = useState(''); const [evidenceRequestKey, setEvidenceRequestKey] = useState(() => crypto.randomUUID());
-  const load = useCallback(() => api<any>(`/api/disputes/${encodeURIComponent(id)}`).then(setData).catch((e) => setError(e.message)), [id, setError]);
+function DisputePage({ id, setup, setError }: { id: string; setup: Setup; setError: (value: string) => void }) {
+  const [data, setData] = useState<DisputeView & { order: Order | null } | null>(null); const [notes, setNotes] = useState(''); const [busy, setBusy] = useState(false); const [message, setMessage] = useState('');
+  const load = useCallback(() => api<DisputeView & { order: Order | null }>(`/api/disputes/${encodeURIComponent(id)}`).then((value) => { setData(value); setNotes((current) => current || value.submittedNotes || value.plan?.notes || ''); }).catch((e) => setError(e.message)), [id, setError]);
   useEffect(() => { void load(); }, [load]);
   const draft = async () => { setBusy(true); setError(''); try { const result = await api<{ notes: string }>(`/api/disputes/${encodeURIComponent(id)}/draft`, { method: 'POST' }); setNotes(result.notes); } catch (e) { setError(e instanceof Error ? e.message : 'Draft failed'); } finally { setBusy(false); } };
-  const submit = async () => { setBusy(true); setError(''); setMessage(''); const form = new FormData(); form.append('notes', notes); form.append('requestKey', evidenceRequestKey);
-    try { const result = await api<{ status: string }>(`/api/disputes/${encodeURIComponent(id)}/evidence`, { method: 'POST', body: form }); setMessage(`PayPal now shows ${result.status}.`); setEvidenceRequestKey(crypto.randomUUID()); await load(); }
-    catch (e) { setError(e instanceof Error ? e.message : 'Evidence submission failed'); } finally { setBusy(false); }
+  const submit = async () => { setBusy(true); setError(''); setMessage(''); const form = new FormData(); form.append('notes', notes);
+    try { const result = await api<{ status: string }>(`/api/disputes/${encodeURIComponent(id)}/evidence`, { method: 'POST', body: form }); setMessage(data?.simulated ? `Simulated: the stand-in PayPal now shows ${result.status}. Nothing was sent to PayPal.` : `PayPal now shows ${result.status}.`); await load(); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Evidence submission failed'); await load(); } finally { setBusy(false); }
   };
   const sandbox = async (action: 'require-evidence' | 'adjudicate') => { setBusy(true); setError(''); try { const result = await api<any>(`/api/disputes/${encodeURIComponent(id)}/sandbox/${action}`, { method: 'POST' }); setMessage(`Sandbox dispute status: ${result.dispute.status}`); await load(); } catch (e) { setError(e instanceof Error ? e.message : 'Sandbox action failed'); } finally { setBusy(false); } };
   if (!data) return <div className="loading-panel" role="status">Loading dispute from PayPal…</div>;
-  const dispute = data.dispute; const order = data.order;
+  const dispute = data.dispute; const order = data.order; const plan = data.plan;
+  const submitted = Boolean(data.submittedAt);
+  const honest = plan && plan.protection !== 'PROTECTED';
+  const cautious = honest || dispute.reason !== 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED';
   return <>
     <div className="breadcrumb"><a href="/disputes" onClick={(e) => { e.preventDefault(); nav('/disputes'); }}>Disputes</a><span aria-hidden="true">/</span><span className="mono">{id}</span></div>
-    <div className="page-heading"><div><p className="overline">Dispute evidence file</p><h1>{dispute.reason || 'Seller response'}</h1><p className="mono">{dispute.dispute_id}</p></div><StatusBadge status={dispute.status} /></div>
+    <div className="page-heading"><div><p className="overline">{data.simulated ? 'Simulated dispute · not sent to PayPal' : 'Dispute evidence file'}</p><h1>{reasonLabel(dispute.reason)}</h1><p className="mono">{dispute.dispute_id}{dispute.seller_response_due_date ? ` · respond by ${formatTime(dispute.seller_response_due_date)}` : ''}</p></div><StatusBadge status={dispute.status} /></div>
     {message && <p className="success-line" role="status">{message}</p>}
     <div className="dispute-detail-grid">
-      <section className="paper-panel evidence-editor"><div className="section-heading"><h2>Seller notes</h2></div><p>Drafts use only saved order and shipping evidence. Review and edit every sentence before submitting.</p><button className="button button-secondary" disabled={busy || !order} onClick={() => void draft()}>{busy ? 'Working…' : 'Draft notes from stored evidence'}</button><label htmlFor="seller-notes">Notes for PayPal</label><textarea id="seller-notes" rows={8} value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={2000} /><div className="submit-bar"><span>{notes.length} / 2,000</span><button className="button button-primary" disabled={busy || !notes.trim() || !order?.has_label}>{busy ? 'Submitting…' : 'Submit evidence to PayPal'}</button></div><p className="field-help">The stored label photo is attached with your notes and tracking number.</p></section>
-      <aside className="evidence-rail"><div className="section-heading"><h2>Stored evidence</h2></div>{order ? <><div className="evidence-summary"><p><span>Matched order</span><a href={`/orders/${encodeURIComponent(order.id)}`} onClick={(e) => { e.preventDefault(); nav(`/orders/${encodeURIComponent(order.id)}`); }} className="mono">{order.id}</a></p><p><span>Capture ID</span><code>{order.capture_id || 'Not recorded'}</code></p><p><span>Tracking</span><code>{order.carrier || 'Carrier unknown'} · {order.tracking_number || 'Not recorded'}</code></p><p><span>Tracker posted</span><code>{order.tracker_posted_at || 'Not recorded'}</code></p><p><span>Address check</span><StatusBadge status={order.protection_state} /></p></div>{order.has_label && <img className="evidence-photo" src={`/api/labels/${encodeURIComponent(order.id)}`} alt="Shipping label attached to this order" />}</> : <div className="empty-panel"><h3>Link the captured order</h3><p>Add the matching PayPal order ID to connect its shipment evidence.</p></div>}
-      {setup.paypalEnv !== 'live' && <div className="sandbox-controls"><p className="overline">Sandbox controls</p><button className="button button-secondary" disabled={busy} onClick={() => void sandbox('require-evidence')}>Sandbox: request seller evidence</button><button className="button button-secondary" disabled={busy} onClick={() => void sandbox('adjudicate')}>Sandbox: adjudicate</button></div>}</aside>
+      <div className="dispute-main">
+        <DisputeTimeline view={data} />
+        <section className="paper-panel evidence-editor"><div className="section-heading"><h2>Seller notes</h2></div>
+          {honest && <p className="honesty-line" role="note">{plan.protection === 'NO LABEL CHECK' ? 'No label check is on file for this order. These notes cannot claim an address match.' : 'The label did not match the PayPal shipping address. These notes say so; Postmark does not claim Seller Protection for this parcel.'}</p>}
+          <p>Pre-filled from stored evidence only: tracking, the PayPal tracker and the field-by-field address check. Review and edit before submitting.</p>
+          {!data.simulated && <button className="button button-secondary" disabled={busy || !order || submitted} onClick={() => void draft()}>{busy ? 'Working…' : 'Redraft notes with AI'}</button>}
+          <label htmlFor="seller-notes">Notes for PayPal</label><textarea id="seller-notes" rows={7} value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={2000} readOnly={submitted} />
+          <div className="submit-bar"><span>{notes.length} / 2,000</span><button className={`button ${cautious ? 'button-secondary' : 'button-primary'}`} disabled={busy || submitted || !notes.trim() || !plan?.canSubmitManually} onClick={() => void submit()}>{submitted ? 'Evidence submitted' : busy ? 'Submitting…' : `${cautious ? 'Submit anyway' : 'Submit evidence'}${data.simulated ? ' (simulated)' : ' to PayPal'}`}</button></div>
+          <p className="field-help">{submitted ? 'PayPal accepts one evidence submission per request. Postmark will not send this dispute again.' : `Sends ${plan?.evidenceType === 'PROOF_OF_FULFILLMENT' ? 'proof of fulfillment' : 'evidence'} with the stored label photo, carrier and tracking number.`}</p>
+        </section>
+      </div>
+      <aside className="evidence-rail"><div className="section-heading"><h2>Stored evidence</h2></div>{order ? <><div className="evidence-summary"><p><span>Matched order</span><a href={`/orders/${encodeURIComponent(order.id)}`} onClick={(e) => { e.preventDefault(); nav(`/orders/${encodeURIComponent(order.id)}`); }} className="mono">{order.id}</a></p><p><span>Capture ID</span><code>{order.capture_id || 'Not recorded'}</code></p><p><span>Tracking</span><code>{order.carrier || 'Carrier unknown'} · {order.tracking_number || 'Not recorded'}</code></p><p><span>Tracker posted</span><code>{order.tracker_posted_at || 'Not recorded'}</code></p><p><span>Address check</span><StatusBadge status={plan?.protection ?? order.protection_state} /></p></div>{order.has_label && <img className="evidence-photo" src={`/api/labels/${encodeURIComponent(order.id)}`} alt="Shipping label attached to this order" />}</> : <div className="empty-panel"><h3>Link the captured order</h3><p>Add the matching PayPal order ID to connect its shipment evidence.</p></div>}
+      {setup.paypalEnv !== 'live' && !data.simulated && <div className="sandbox-controls"><p className="overline">Sandbox controls</p><button className="button button-secondary" disabled={busy} onClick={() => void sandbox('require-evidence')}>Sandbox: request seller evidence</button><button className="button button-secondary" disabled={busy} onClick={() => void sandbox('adjudicate')}>Sandbox: adjudicate</button></div>}</aside>
     </div>
   </>;
+}
+
+type TimelineEvent = { kind: 'RECEIVED' | 'ASSEMBLED' | 'HELD' | 'SUBMITTED' | 'READ_BACK' | 'FAILED'; at: string; detail: any };
+type DisputeView = { dispute: { dispute_id: string; status: string; reason: string | null; seller_response_due_date: string | null }; plan: any; timeline: TimelineEvent[]; submittedAt: string | null; submittedNotes: string | null; autoAnswer: boolean; simulated: boolean };
+const REASONS: Record<string, string> = { MERCHANDISE_OR_SERVICE_NOT_RECEIVED: 'Item not received', MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED: 'Item not as described', UNAUTHORISED: 'Unauthorised transaction', CREDIT_NOT_PROCESSED: 'Credit not processed', DUPLICATE_TRANSACTION: 'Duplicate transaction', INCORRECT_AMOUNT: 'Incorrect amount', PAYMENT_BY_OTHER_MEANS: 'Paid by other means' };
+const reasonLabel = (reason?: string | null) => (reason && REASONS[reason]) || reason || 'Seller response requested';
+const sqlTime = (value: string) => formatTime(/Z|[+-]\d\d:?\d\d$/.test(value) ? value : `${value.replace(' ', 'T')}Z`);
+
+function DisputeTimeline({ view }: { view: DisputeView }) {
+  const find = (kind: TimelineEvent['kind']) => view.timeline.find((event) => event.kind === kind);
+  const received = find('RECEIVED'); const assembled = find('ASSEMBLED'); const held = find('HELD'); const submitted = find('SUBMITTED'); const readBack = find('READ_BACK'); const failed = find('FAILED');
+  const plan = view.plan; const included = assembled?.detail ?? (plan ? { ...plan.included, protection: plan.protection, evidenceType: plan.evidenceType } : null);
+  const protection = included?.protection as string | undefined;
+  type Step = { key: string; title: string; state: 'done' | 'held' | 'failed' | 'pending'; at?: string; body: React.ReactNode };
+  const steps: Step[] = [
+    { key: 'received', title: 'Dispute received', state: received ? 'done' : 'pending', at: received?.at, body: received ? <p>{reasonLabel(received.detail.reason)}{received.detail.amount ? ` · ${received.detail.amount.currency_code} ${received.detail.amount.value}` : ''} · via {received.detail.source}</p> : <p>Waiting for PayPal to report this dispute.</p> },
+    { key: 'assembled', title: 'Evidence assembled', state: assembled ? 'done' : 'pending', at: assembled?.at, body: included ? <ul className="evidence-checklist">
+      <li data-ok={included.labelPhoto || undefined}>{included.labelPhoto ? 'Label photo attached' : 'No label photo on file'}</li>
+      <li data-ok={included.labelRead ? true : undefined}>{included.labelRead ? `AI label read: ${included.labelRead.carrier ?? 'carrier ?'} · ${groupTracking(included.labelRead.trackingNumber ?? '')}${included.labelRead.confidence != null ? ` · ${Math.round(included.labelRead.confidence * 100)}%` : ''}` : 'No AI label read'}</li>
+      <li data-ok={protection === 'PROTECTED' || undefined} data-risk={protection && protection !== 'PROTECTED' ? true : undefined}>{protection === 'PROTECTED' ? 'Address check PROTECTED: every field matches the PayPal shipping address' : protection === 'NO LABEL CHECK' ? 'No label check recorded: no address match to show' : `Address check ${protection}: ${(included.verdict?.addressDifferences ?? []).map((d: any) => addressFieldLabel(d.field).toLowerCase()).join(', ') || 'label'} differs from PayPal${protection === 'SHIPPED ANYWAY' ? ', shipped anyway' : ''}`}</li>
+      <li data-ok={included.trackerId ? true : undefined}>{included.trackerId ? <>Tracking on PayPal: {included.tracking?.carrier} <span className="mono">{groupTracking(included.tracking?.trackingNumber ?? '')}</span>{included.trackerPostedAt ? `, posted ${sqlTime(included.trackerPostedAt)}` : ''}</> : included.tracking ? 'Tracking stored but never posted to PayPal' : 'No tracking number stored'}</li>
+      <li className="evidence-type">Evidence type <span className="mono">{included.evidenceType}</span></li>
+    </ul> : <p>No matching Postmark order.</p> },
+    submitted ? { key: 'response', title: submitted.detail.mode === 'auto' ? 'Response submitted automatically' : 'Response submitted', state: 'done', at: submitted.at, body: <p>{submitted.detail.simulated ? 'Sent to the simulated PayPal stand-in (not PayPal) ' : 'Sent to PayPal provide-evidence '}with the label photo and {submitted.detail.tracking?.carrier} tracking {groupTracking(submitted.detail.tracking?.trackingNumber ?? '')}.</p> }
+      : failed ? { key: 'response', title: 'Submission failed', state: 'failed', at: failed.at, body: <p>{failed.detail.message}. Retrying reuses the same PayPal-Request-Id, so PayPal cannot record it twice.</p> }
+      : held ? { key: 'response', title: 'Held for the seller', state: 'held', at: held.at, body: <ul className="hold-reasons">{(held.detail.reasons as string[]).map((reason) => <li key={reason}>{reason}</li>)}</ul> }
+      : { key: 'response', title: 'Response', state: 'pending', body: <p>{view.autoAnswer ? 'Answers automatically when the evidence qualifies.' : 'Submit from this page.'}</p> },
+    { key: 'readback', title: 'PayPal status read back', state: readBack ? 'done' : 'pending', at: readBack?.at, body: readBack ? <p>{readBack.detail.simulated ? 'Stand-in' : 'PayPal'} now shows <StatusBadge status={readBack.detail.status} />{readBack.detail.evidenceCount ? ` · ${readBack.detail.evidenceCount} evidence item${readBack.detail.evidenceCount === 1 ? '' : 's'} on file` : ''}</p> : <p>Postmark reads the dispute back after submitting and records what PayPal shows.</p> },
+  ];
+  return <section className="dispute-timeline" aria-label="Dispute timeline">
+    <div className="timeline-heading"><h2>Dispute timeline</h2>{view.simulated ? <span className="timeline-tag">Simulated · nothing sent to PayPal</span> : <span className="timeline-tag">{view.autoAnswer ? 'Auto-answer on' : 'Auto-answer off'}</span>}</div>
+    <ol>{steps.map((step) => <li key={step.key} className={`timeline-step step-${step.state}`}><span className="timeline-dot" aria-hidden="true"></span><div className="timeline-body"><div className="timeline-title"><strong>{step.title}</strong>{step.at && <time dateTime={step.at}>{sqlTime(step.at)}</time>}</div>{step.body}</div></li>)}</ol>
+  </section>;
+}
+
+function OrderDisputes({ order, setup, setError }: { order: Order; setup: Setup; setError: (value: string) => void }) {
+  const [views, setViews] = useState<DisputeView[] | null>(null); const [busy, setBusy] = useState(false);
+  const load = useCallback(() => api<DisputeView[]>(`/api/orders/${encodeURIComponent(order.id)}/disputes`).then(setViews).catch(() => setViews([])), [order.id]);
+  useEffect(() => { void load(); }, [load]);
+  const simulate = async (kind: 'INR' | 'SNAD') => { setBusy(true); setError(''); try { await api(`/api/demo/disputes/simulate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: order.id, kind }) }); await load(); } catch (e) { setError(e instanceof Error ? e.message : 'Simulation failed'); } finally { setBusy(false); } };
+  const canSimulate = setup.demoMode && order.capture_id;
+  if (!views || (!views.length && !canSimulate)) return null;
+  return <section className="order-disputes">
+    <div className="section-heading"><h2>PayPal disputes</h2><span className="section-rule"></span></div>
+    {views.map((view) => <div className="order-dispute" key={view.dispute.dispute_id}>
+      <DisputeTimeline view={view} />
+      <a className="button button-secondary" href={`/disputes/${encodeURIComponent(view.dispute.dispute_id)}`} onClick={(e) => { e.preventDefault(); nav(`/disputes/${encodeURIComponent(view.dispute.dispute_id)}`); }}>{view.submittedAt ? 'Open dispute file' : 'Review and submit evidence'}</a>
+    </div>)}
+    {!views.length && <p className="field-help">No PayPal dispute on this order.</p>}
+    {canSimulate && <div className="sandbox-card"><p className="overline">Sandbox demo · fixture data · nothing sent to PayPal</p><h3>Simulate a buyer dispute</h3><p>Runs a recorded PayPal dispute payload against this order through the same planner and submission code. Each run replaces the previous simulation.</p><div className="button-row"><button className="button button-secondary" disabled={busy} onClick={() => void simulate('INR')}>Item not received</button><button className="button button-secondary" disabled={busy} onClick={() => void simulate('SNAD')}>Item not as described</button></div></div>}
+  </section>;
 }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><Root /></React.StrictMode>);

@@ -504,3 +504,43 @@ input[type="file"] { padding: 8px; font-size: 14px; }
   .footer-links { margin-left: 0; flex-direction: column; gap: 6px; }
 }
 .urgent-body > p.urgent-risk { margin: 10px 0; padding: 8px 10px; border-left: 3px solid var(--color-accent); background: var(--color-danger-paper); color: var(--color-accent-dark); font-weight: 700; }
+
+/* Dispute timeline */
+.dispute-main { display: grid; gap: 24px; min-width: 0; }
+.order-disputes { margin-top: 48px; display: grid; gap: 20px; max-width: 760px; }
+.order-dispute { display: grid; gap: 12px; justify-items: start; }
+.order-dispute .dispute-timeline { width: 100%; }
+.dispute-timeline { border: 1px solid var(--color-rule); background: var(--surface); padding: 20px 22px 8px; }
+.timeline-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 14px; }
+.timeline-heading h2 { margin: 0; font: 500 20px/1.2 var(--font-display); }
+.timeline-tag { font: 500 10px/1.2 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--color-muted); border: 1px solid var(--color-rule); padding: 4px 7px; }
+.dispute-timeline ol { list-style: none; margin: 0; padding: 0; }
+.timeline-step { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; padding-bottom: 16px; }
+.timeline-step:not(:last-child)::before { content: ''; position: absolute; left: 6px; top: 16px; bottom: 0; width: 1px; background: var(--color-rule); }
+.timeline-dot { width: 13px; height: 13px; margin-top: 4px; border: 2px solid var(--color-rule); background: var(--color-paper); border-radius: 50%; }
+.step-done .timeline-dot { border-color: var(--color-good); background: var(--color-good); }
+.step-held .timeline-dot { border-color: var(--color-warn); background: var(--color-warn-paper); }
+.step-failed .timeline-dot { border-color: var(--color-accent); background: var(--color-accent); }
+.step-pending { color: var(--color-muted); }
+.timeline-body { min-width: 0; }
+.timeline-body p { margin: 2px 0 0; font-size: 15px; }
+.timeline-title { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; }
+.timeline-title strong { font-weight: 600; }
+.timeline-title time { font: 400 12px/1.3 var(--font-mono); color: var(--color-muted); }
+.step-held .timeline-title strong { color: var(--color-warn); }
+.step-failed .timeline-title strong { color: var(--color-accent-dark); }
+.evidence-checklist, .hold-reasons { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 15px; }
+.evidence-checklist li { position: relative; padding-left: 20px; overflow-wrap: anywhere; }
+.evidence-checklist li::before { content: '–'; position: absolute; left: 2px; color: var(--color-muted); }
+.evidence-checklist li[data-ok]::before { content: '✓'; color: var(--color-good); }
+.evidence-checklist li[data-risk] { color: var(--color-accent-dark); }
+.evidence-checklist li[data-risk]::before { content: '!'; color: var(--color-accent); font-weight: 700; }
+.evidence-checklist .evidence-type { color: var(--color-muted); font-size: 13px; }
+.evidence-checklist .evidence-type::before { content: ''; }
+.hold-reasons li { padding: 6px 10px; background: var(--color-warn-paper); color: var(--color-ink); border-left: 2px solid var(--color-warn); }
+.honesty-line { margin: 0 0 12px; padding: 10px 12px; background: var(--color-danger-paper); border-left: 2px solid var(--color-accent); color: var(--color-accent-dark); }
+.timeline-step .status-badge { vertical-align: 1px; }
+@media (max-width: 640px) {
+  .dispute-timeline { padding: 16px 14px 4px; }
+  .order-disputes { margin-top: 32px; }
+}
