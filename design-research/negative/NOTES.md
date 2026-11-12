@@ -9,3 +9,7 @@ Tells present: system-adjacent geometric sans (Poppins) with no negative trackin
 ## shippo-docs-cardgrid-1440.png, shippo-docs-cardgrid-390.png
 
 Source: https://goshippo.com/shipping-api/address-validation, which redirected to the Shippo API docs index (captured 2026-11-12). Why to avoid: dark `#09090b` page with a 3x3 grid of 12px-radius cards, each a green line icon above a bold heading, Rethink Sans h1 36px tracking -0.9px; the exact "big rounded icon above heading, cards on dark" tell that any docs template ships.
+
+## chargeflow-bigmetric-1440.png, chargeflow-bigmetric-390.png
+
+Source: https://www.chargeflow.io/ (captured 2026-11-12, a webinar modal covers the first screen). Why to avoid: black page, Degular Display h1 104px uppercase with normal tracking, then "$200M+ / $50+ BILLION / 20K+" stacked as giant numbers with tiny labels, glowing blue dots and a gauge widget; the big-metric template plus neon-on-dark, the dispute category's house look that Postmark must not resemble.
