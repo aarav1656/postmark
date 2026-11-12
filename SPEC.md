@@ -1,6 +1,6 @@
 # Postmark: Seller Protection checked at the shipping label
 
-Read first: `docs/COMMON-SPEC.md`, `docs/PAYPAL-API.md` (copied into this repo).
+PayPal API reference: `docs/PAYPAL-API.md`.
 
 ## Who
 Small PayPal sellers who lose disputes while holding proof that is not in PayPal's shape. Demand: r/PokemonInvesting "Buyer filed chargeback on PayPal $8200 USD" (585 upvotes), r/paypal "PayPal refunded buyer $1,700, let him keep everything" (225 upvotes), r/paypal "i lost the Paypal chargeback after having all the proofs". PayPal's Seller Protection proof of delivery requires "An online and verifiable tracking number" and "An address for the recipient that matches the shipping address on the Transaction Details page" (paypal.com/us/webapps/mpp/ua/seller-protection). Sellers find out about the mismatch after the money is gone.
