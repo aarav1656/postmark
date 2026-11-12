@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -18,6 +19,8 @@ import { renderSandboxLabel } from '../src/domain/sandbox-label.ts';
 import { findTracker } from '../src/domain/tracker.ts';
 
 export const app = new Hono();
+const frontendOrigin = new URL(process.env.PUBLIC_URL || 'http://localhost:8787').origin;
+app.use('/api/*', cors({ origin: frontendOrigin, allowMethods: ['GET', 'POST', 'OPTIONS'], allowHeaders: ['Content-Type'], credentials: true, maxAge: 600 }));
 const dataDir = process.env.DATA_DIR || './data';
 const labelsDir = join(dataDir, 'labels');
 mkdirSync(labelsDir, { recursive: true });
