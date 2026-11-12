@@ -359,7 +359,7 @@ function BuyerPage({ id }: { id: string }) {
           {error && <p className="field-error" role="alert">{error}</p>}
           {paid ? <div className="buyer-receipt" role="status"><span className="verdict-stamp" data-verdict="PAID">PAID</span><div><strong>PayPal confirmed your payment.</strong><span className="mono">Order {paid}</span><span>The seller ships to the address on your PayPal order.</span></div></div>
             : <button className="button button-paypal" disabled={busy} onClick={() => void buy()}>{busy ? 'Opening PayPal…' : 'Buy with PayPal'}</button>}
-          <dl className="buyer-facts"><div><dt>Ships to</dt><dd>The address you confirm in PayPal</dd></div><div><dt>Payment</dt><dd>PayPal checkout, captured on return</dd></div></dl>
+          <dl className="buyer-facts"><div><dt>Ships to</dt><dd>The address you confirm in PayPal</dd></div><div><dt>Payment</dt><dd>PayPal checkout, captured on return</dd></div><div><dt>Label check</dt><dd>Before it ships, the seller's label is checked against this PayPal address.</dd></div></dl>
         </div>
       </article>}
     </main>
