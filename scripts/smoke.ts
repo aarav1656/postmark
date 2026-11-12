@@ -76,7 +76,7 @@ try {
     address_line_1: address.address_line_1, address_line_2: address.address_line_2 ?? '', city: address.admin_area_2 ?? '',
     state: address.admin_area_1 ?? '', postal_code: address.postal_code, country_code: address.country_code,
   };
-  const rendered = await renderSandboxLabel(activeOrderId, paypalAddress, false);
+  const rendered = await renderSandboxLabel(activeOrderId, paypalAddress, false, ship?.name?.full_name ?? null);
   const dataDir = process.env.DATA_DIR || './data';
   const labelsDir = join(dataDir, 'labels'); mkdirSync(labelsDir, { recursive: true });
   const labelPath = join(labelsDir, `${randomUUID()}.png`); writeFileSync(labelPath, rendered.png);

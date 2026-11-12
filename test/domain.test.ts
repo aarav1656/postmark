@@ -3,6 +3,7 @@ import { compareAddresses } from '../src/domain/address.ts';
 import { assembleEvidencePacket, matchDisputeToOrder } from '../src/domain/dispute.ts';
 import { preflight } from '../src/domain/verdict.ts';
 import { isValidTrackingNumber } from '../src/domain/tracking.ts';
+import { sandboxLabelSvg } from '../src/domain/sandbox-label.ts';
 
 const address = {
   address_line_1: '123 North Main Street Apt 4',
@@ -57,6 +58,14 @@ describe('preflight verdict', () => {
     expect(result.state).toBe('AT RISK');
     expect(result.addressDifferences.map((d) => d.field)).toContain('unit');
     expect(result.reasons).toHaveLength(2);
+  });
+});
+
+describe('sandbox test labels', () => {
+  it.each([false, true])('prints the PayPal recipient name on the %s unit variant', (wrongUnit) => {
+    const svg = sandboxLabelSvg('ORDER-1', address, wrongUnit, 'Ada Lovelace');
+    expect(svg).toContain('>Ada Lovelace</text>');
+    expect(svg).toContain(wrongUnit ? 'Apt 999' : 'Apt 4');
   });
 });
 

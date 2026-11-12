@@ -29,7 +29,7 @@ const missingEnv = () => [
   process.env.PAYPAL_ENV !== 'live' && !process.env.DEMO_BUYER_EMAIL && 'DEMO_BUYER_EMAIL',
 ].filter((value): value is string => Boolean(value));
 
-const getOrderRow = (id: string) => db.prepare('SELECT * FROM orders WHERE id=?').get(id) as (StoredOrder & Record<string, unknown>) | undefined;
+const getOrderRow = (id: string) => db.prepare('SELECT * FROM orders WHERE id=?').get(id) as (StoredOrder & { buyer_name: string | null } & Record<string, unknown>) | undefined;
 const getOrder = (id: string) => {
   const row = getOrderRow(id);
   if (!row) return null;
@@ -250,7 +250,7 @@ app.get('/api/orders/:id/sandbox-label', async (c) => {
   if (process.env.PAYPAL_ENV === 'live') return c.json({ error: 'Sandbox labels are disabled in live mode.' }, 404);
   const order = getOrder(c.req.param('id'));
   if (!order?.address) return c.json({ error: 'Order with a PayPal shipping address not found.' }, 404);
-  const label = await renderSandboxLabel(order.id, order.address, c.req.query('wrongUnit') === '1');
+  const label = await renderSandboxLabel(order.id, order.address, c.req.query('wrongUnit') === '1', order.buyer_name ?? null);
   db.prepare('UPDATE orders SET tracking_number=?,carrier=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(label.tracking, label.carrier, order.id);
   c.header('Content-Type', 'image/png');
   c.header('Content-Disposition', `attachment; filename="postmark-sandbox-${order.id}.png"`);
