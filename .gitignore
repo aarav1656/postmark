@@ -11,3 +11,4 @@ BUILD-REPORT.md
 *.log
 .DS_Store
 .codex-prompt.txt
+.codex-prompt-fix1.txt
