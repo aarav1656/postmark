@@ -17,6 +17,7 @@ import { draftDisputeNotes } from '../src/ai/notes.ts';
 import { beginOperation, failOperation, finishOperation, paypal } from '../src/paypal.ts';
 import { renderSandboxLabel } from '../src/domain/sandbox-label.ts';
 import { findTracker } from '../src/domain/tracker.ts';
+import { resetLabelAssessment } from './label-assessment.ts';
 
 export const app = new Hono();
 const frontendOrigin = new URL(process.env.PUBLIC_URL || 'http://localhost:8787').origin;
@@ -204,6 +205,7 @@ app.post('/api/orders/:id/label', async (c) => {
   if (!(file instanceof File) || !['image/jpeg', 'image/png'].includes(file.type) || file.size < 1 || file.size > 10 * 1024 * 1024) {
     return c.json({ error: 'Choose a JPEG or PNG label photo under 10 MB.' }, 400);
   }
+  if (!resetLabelAssessment(db, orderId, order.tracker_id ?? null)) return c.json({ error: 'The PayPal tracker is already posted. Keep this label as shipment evidence.' }, 409);
   const id = randomUUID();
   const path = join(labelsDir, `${id}.${file.type === 'image/png' ? 'png' : 'jpg'}`);
   const imageBytes = Buffer.from(await file.arrayBuffer());
