@@ -16,6 +16,8 @@ import { preflight, protectionStateAfterLabel } from '../src/domain/verdict.ts';
 import { extractLabel } from '../src/ai/label.ts';
 import { draftDisputeNotes } from '../src/ai/notes.ts';
 import { beginOperation, failOperation, finishOperation, paypal } from '../src/paypal.ts';
+import { captureOrder, createOrder, getOrder as getPaypalOrder } from '../src/paypal-orders.ts';
+import { CheckoutPaymentIntent, ItemCategory, PaypalExperienceUserAction, PaypalWalletContextShippingPreference } from '@paypal/paypal-server-sdk';
 import { renderSandboxLabel } from '../src/domain/sandbox-label.ts';
 import { findTracker } from '../src/domain/tracker.ts';
 import { resetLabelAssessment } from './label-assessment.ts';
@@ -181,7 +183,7 @@ app.post('/api/orders/import', async (c) => {
   const unavailable = requirePaypal(c); if (unavailable) return unavailable;
   const body = z.object({ orderId: z.string().min(1).max(36) }).safeParse(await c.req.json());
   if (!body.success) return c.json({ error: body.error.issues[0]?.message }, 400);
-  try { return c.json(savePaypalOrder(await paypal(`/v2/checkout/orders/${encodeURIComponent(body.data.orderId)}`))); }
+  try { return c.json(savePaypalOrder(await getPaypalOrder(body.data.orderId))); }
   catch (error) { return c.json({ error: error instanceof Error ? error.message : 'PayPal order lookup failed' }, 502); }
 });
 
@@ -231,21 +233,19 @@ app.post('/api/public/listings/:id/checkout', async (c) => {
   const op = beginOperation(operationId, 'create-order');
   const approvalUrl = (order: any) => order.links?.find((link: any) => link.rel === 'payer-action')?.href;
   try {
-    if (op.done && op.entityId) return c.json({ id: op.entityId, approvalUrl: approvalUrl(await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(op.entityId)}`)) });
-    const value = { currency_code: listing.currency, value: (listing.price_cents / 100).toFixed(2) };
+    if (op.done && op.entityId) return c.json({ id: op.entityId, approvalUrl: approvalUrl(await getPaypalOrder(op.entityId)) });
+    const value = { currencyCode: listing.currency, value: (listing.price_cents / 100).toFixed(2) };
     const itemPage = `${publicUrl()}/item/${encodeURIComponent(listing.id)}`;
-    const order = await paypal<any>('/v2/checkout/orders', {
-      method: 'POST', body: JSON.stringify({
-        intent: 'CAPTURE',
-        purchase_units: [{
-          reference_id: body.data.requestKey, custom_id: `listing:${listing.id}`, description: listing.title.slice(0, 127),
-          amount: { ...value, breakdown: { item_total: value } },
-          items: [{ name: listing.title.slice(0, 127), quantity: '1', unit_amount: value, category: 'PHYSICAL_GOODS' }],
-        }],
-        payment_source: { paypal: { experience_context: { return_url: `${itemPage}?capture=1`, cancel_url: `${itemPage}?cancelled=1`, user_action: 'PAY_NOW', shipping_preference: 'GET_FROM_FILE', brand_name: 'Postmark' } } },
-      }),
+    const order = await createOrder({
+      intent: CheckoutPaymentIntent.Capture,
+      purchaseUnits: [{
+        referenceId: body.data.requestKey, customId: `listing:${listing.id}`, description: listing.title.slice(0, 127),
+        amount: { ...value, breakdown: { itemTotal: value } },
+        items: [{ name: listing.title.slice(0, 127), quantity: '1', unitAmount: value, category: ItemCategory.PhysicalGoods }],
+      }],
+      paymentSource: { paypal: { experienceContext: { returnUrl: `${itemPage}?capture=1`, cancelUrl: `${itemPage}?cancelled=1`, userAction: PaypalExperienceUserAction.PayNow, shippingPreference: PaypalWalletContextShippingPreference.GetFromFile, brandName: 'Postmark' } } },
     }, op.requestId);
-    const readback = await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(order.id)}`);
+    const readback = await getPaypalOrder(order.id);
     if (readback.id !== order.id) throw new Error('PayPal order read-back did not match the created order');
     finishOperation(operationId, order.id);
     return c.json({ id: readback.id, approvalUrl: approvalUrl(readback) });
@@ -255,15 +255,14 @@ app.post('/api/public/listings/:id/capture', async (c) => {
   const unavailable = requirePaypal(c); if (unavailable) return unavailable;
   const body = z.object({ orderId: z.string().min(1).max(36) }).safeParse(await c.req.json().catch(() => ({})));
   if (!body.success) return c.json({ error: 'Missing PayPal order id.' }, 400);
-  const orderPath = `/v2/checkout/orders/${encodeURIComponent(body.data.orderId)}`;
   try {
-    const before = await paypal<any>(orderPath);
+    const before = await getPaypalOrder(body.data.orderId);
     if (before.purchase_units?.[0]?.custom_id !== `listing:${c.req.param('id')}`) return c.json({ error: 'This PayPal order is not for this item.' }, 404);
     const operationId = `capture-order:${body.data.orderId}`;
     const op = beginOperation(operationId, 'capture-order');
     try {
-      if (!op.done && before.status !== 'COMPLETED') await paypal(`${orderPath}/capture`, { method: 'POST', body: '{}' }, op.requestId);
-      const readback = await paypal<any>(orderPath);
+      if (!op.done && before.status !== 'COMPLETED') await captureOrder(body.data.orderId, op.requestId);
+      const readback = await getPaypalOrder(body.data.orderId);
       if (readback.status !== 'COMPLETED' || !readback.purchase_units?.[0]?.payments?.captures?.[0]?.id) throw new Error(`Payment is not complete. PayPal order status: ${readback.status}`);
       finishOperation(operationId, body.data.orderId);
       savePaypalOrder(readback);
@@ -318,7 +317,7 @@ app.post('/api/orders/:id/track', async (c) => {
     if (!op.done) await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(order.id)}/track`, {
       method: 'POST', body: JSON.stringify({ capture_id: order.capture_id, tracking_number: order.extraction.tracking_number, carrier: order.extraction.carrier, notify_payer: false }),
     }, op.requestId).catch((error) => { postError = error; });
-    const readback = await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(order.id)}`);
+    const readback = await getPaypalOrder(order.id);
     const tracker = findTracker(readback.purchase_units?.[0]?.shipping?.trackers ?? [], order.capture_id, order.extraction.tracking_number, order.extraction.carrier);
     if (!tracker) throw postError ?? new Error('PayPal order read-back does not contain the requested tracker');
     finishOperation(key, tracker.id);

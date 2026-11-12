@@ -6,6 +6,8 @@ import { renderSandboxLabel } from '../src/domain/sandbox-label.ts';
 import { preflight } from '../src/domain/verdict.ts';
 import { extractLabel } from '../src/ai/label.ts';
 import { beginOperation, failOperation, finishOperation, paypal } from '../src/paypal.ts';
+import { captureOrder, createOrder, getOrder } from '../src/paypal-orders.ts';
+import { CheckoutPaymentIntent, PaypalExperienceUserAction, PaypalWalletContextShippingPreference } from '@paypal/paypal-server-sdk';
 
 const missing = [
   !process.env.PAYPAL_CLIENT_ID && 'PAYPAL_CLIENT_ID',
@@ -16,7 +18,7 @@ if (missing.length) { console.error(`Missing required environment: ${missing.joi
 if (process.env.PAYPAL_ENV === 'live') { console.error('Smoke requires PAYPAL_ENV=sandbox.'); process.exit(2); }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const readOrder = (id: string) => paypal<any>(`/v2/checkout/orders/${encodeURIComponent(id)}`);
+const readOrder = (id: string) => getOrder(id);
 const skipIndex = process.argv.indexOf('--skip-approve');
 let orderId = skipIndex >= 0 ? process.argv[skipIndex + 1] : undefined;
 
@@ -26,12 +28,9 @@ try {
     const operationId = `smoke-create:${requestKey}`;
     const op = beginOperation(operationId, 'smoke-create-order');
     try {
-      const order = await paypal<any>('/v2/checkout/orders', {
-        method: 'POST',
-        body: JSON.stringify({
-          intent: 'CAPTURE', purchase_units: [{ reference_id: requestKey, description: 'Postmark sandbox shipment smoke', amount: { currency_code: 'USD', value: '0.01' } }],
-          payment_source: { paypal: { experience_context: { return_url: `${process.env.PUBLIC_URL || 'http://localhost:8787'}/shop?capture=1`, cancel_url: `${process.env.PUBLIC_URL || 'http://localhost:8787'}/shop?cancelled=1`, user_action: 'PAY_NOW', shipping_preference: 'GET_FROM_FILE', brand_name: 'Postmark' } } },
-        }),
+      const order = await createOrder({
+        intent: CheckoutPaymentIntent.Capture, purchaseUnits: [{ referenceId: requestKey, description: 'Postmark sandbox shipment smoke', amount: { currencyCode: 'USD', value: '0.01' } }],
+        paymentSource: { paypal: { experienceContext: { returnUrl: `${process.env.PUBLIC_URL || 'http://localhost:8787'}/shop?capture=1`, cancelUrl: `${process.env.PUBLIC_URL || 'http://localhost:8787'}/shop?cancelled=1`, userAction: PaypalExperienceUserAction.PayNow, shippingPreference: PaypalWalletContextShippingPreference.GetFromFile, brandName: 'Postmark' } } },
       }, op.requestId);
       const readback = await readOrder(order.id);
       if (readback.id !== order.id) throw new Error('Create order read-back failed');
@@ -60,7 +59,7 @@ try {
   const capture = beginOperation(captureOperation, 'smoke-capture-order');
   if (!capture.done) {
     try {
-      await paypal(`/v2/checkout/orders/${encodeURIComponent(activeOrderId)}/capture`, { method: 'POST', body: '{}' }, capture.requestId);
+      await captureOrder(activeOrderId, capture.requestId);
     } catch (error) { failOperation(captureOperation, error); throw error; }
   }
   order = await readOrder(activeOrderId);
