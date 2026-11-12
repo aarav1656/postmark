@@ -15,6 +15,7 @@ import { extractLabel } from '../src/ai/label.ts';
 import { draftDisputeNotes } from '../src/ai/notes.ts';
 import { beginOperation, failOperation, finishOperation, paypal } from '../src/paypal.ts';
 import { renderSandboxLabel } from '../src/domain/sandbox-label.ts';
+import { findTracker } from '../src/domain/tracker.ts';
 
 export const app = new Hono();
 const dataDir = process.env.DATA_DIR || './data';
@@ -231,13 +232,13 @@ app.post('/api/orders/:id/track', async (c) => {
   const key = `track:${order.id}:${order.capture_id}:${order.extraction.tracking_number}`;
   const op = beginOperation(key, 'post-tracking');
   try {
+    let postError: unknown;
     if (!op.done) await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(order.id)}/track`, {
       method: 'POST', body: JSON.stringify({ capture_id: order.capture_id, tracking_number: order.extraction.tracking_number, carrier: order.extraction.carrier, notify_payer: false }),
-    }, op.requestId);
+    }, op.requestId).catch((error) => { postError = error; });
     const readback = await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(order.id)}`);
-    const trackers = readback.purchase_units?.[0]?.shipping?.trackers ?? [];
-    const tracker = trackers.find((item: any) => item.tracking_number === order.extraction.tracking_number && item.carrier === order.extraction.carrier);
-    if (!tracker) throw new Error('PayPal order read-back does not contain the requested tracker');
+    const tracker = findTracker(readback.purchase_units?.[0]?.shipping?.trackers ?? [], order.capture_id, order.extraction.tracking_number, order.extraction.carrier);
+    if (!tracker) throw postError ?? new Error('PayPal order read-back does not contain the requested tracker');
     finishOperation(key, tracker.id);
     db.prepare(`UPDATE orders SET tracker_id=?,tracker_posted_at=COALESCE(tracker_posted_at,CURRENT_TIMESTAMP),protection_state='TRACKING ON PAYPAL',status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
       .run(tracker.id, readback.status, order.id);
