@@ -215,36 +215,42 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
   const protectedPass = order.verdict?.state === 'PROTECTED';
   return <>
     <div className="breadcrumb"><a href="/orders" onClick={(e) => { e.preventDefault(); nav('/orders'); }}>Orders</a><span aria-hidden="true">/</span><span className="mono">{order.id}</span></div>
-    <div className="page-heading"><div><p className="overline">Shipment file</p><h1>{order.buyer_name || 'PayPal order'}</h1><p className="mono">{order.id} <span className="copy-divider">·</span> {money(order.amount_cents, order.currency)}</p></div><StatusBadge status={order.protection_state} /></div>
+    <div className="page-heading"><div><p className="overline">Shipment file</p><h1>{order.buyer_name || 'PayPal order'}</h1><p className="mono">{order.id} <span className="copy-divider">·</span> {money(order.amount_cents, order.currency)}</p></div>{!order.verdict && <StatusBadge status={order.protection_state} />}</div>
     {notice && <p className={`notice-line ${order.verdict?.state === 'AT RISK' ? 'notice-risk' : 'notice-good'}`} role="status">{notice}</p>}
     <div className="order-detail-grid">
       <section className="workbench">
-        <div className="section-heading"><h2>Label preflight</h2><span className="section-rule"></span></div>
-        <form className="upload-panel" onSubmit={runLabel}>
-          <label htmlFor="label-photo" className="upload-title">Photograph the printed label</label>
-          <p className="field-help">The photo is read for recipient, address, carrier, and tracking. Use a clear, flat image.</p>
-          <div className="file-controls"><input id="label-photo" type="file" accept="image/jpeg,image/png" capture="environment" onChange={(e) => setFile(e.target.files?.[0] ?? null)} required={!order.extraction} /><button className="button button-primary" disabled={busy || !file}>{busy ? 'Reading label…' : 'Check label'}</button></div>
-        </form>
-        {order.has_label && <figure className="label-figure"><img src={`/api/labels/${encodeURIComponent(order.id)}`} alt="Stored shipping label photo" /><figcaption>Stored label evidence.</figcaption></figure>}
+        <div className="section-heading"><h2>Before you hand it over</h2><span className="section-rule"></span></div>
+        {order.verdict && <>
+          <VerdictPanel verdict={order.verdict} />
+          {order.verdict.addressDifferences?.length > 0 && <div className="redline-panel"><h3>Address fields to fix</h3><p>These values differ from the address PayPal will use for Seller Protection.</p><div className="redline-table" role="table" aria-label="Address fields that differ"><div className="redline-row redline-head" role="row"><span role="columnheader">Field</span><span role="columnheader">PayPal</span><span role="columnheader">Label</span></div>{order.verdict.addressDifferences.map((diff: any) => <div className="redline-row" role="row" key={diff.field}><strong role="rowheader">{addressFieldLabel(diff.field)}</strong><span role="cell">{diff.paypal}</span><span role="cell">{diff.label}</span></div>)}</div><a href={order.verdict.policyUrl} target="_blank" rel="noreferrer">Seller Protection policy</a></div>}
+          {order.extraction && !order.tracker_id && <div className="tracking-action"><button className="button button-primary" disabled={busy || (!protectedPass && !acceptRisk)} onClick={() => void postTracking()}>{busy ? 'Checking PayPal…' : 'Post tracking to PayPal'}</button>
+            {!protectedPass && <label className="risk-override"><input type="checkbox" checked={acceptRisk} onChange={(e) => setAcceptRisk(e.target.checked)} />Ship anyway, I accept the risk</label>}
+            <p className="field-help">Postmark checks PayPal’s order after posting. Tracking appears here only after PayPal confirms it.</p>
+          </div>}
+          {order.tracker_id && <div className="tracker-receipt"><span className="receipt-check" aria-hidden="true">✓</span><div><strong>TRACKING ON PAYPAL</strong><span className="mono">{order.tracker_id}</span><span>Read back at</span><time>{order.tracker_posted_at}</time></div></div>}
+        </>}
         {order.extraction && <div className="extraction-card"><div className="extraction-heading"><h3>What the label says</h3><span>{Math.round(order.extraction.confidence * 100)}% read confidence</span></div>
           <div className="extraction-fields"><div><span>Carrier</span><strong>{order.extraction.carrier}{order.extraction.service ? ` · ${order.extraction.service}` : ''}</strong></div><div><span>Tracking number</span><strong className="mono">{order.extraction.tracking_number}</strong></div><div><span>Recipient</span><strong>{order.extraction.recipient_name || 'Unreadable on this label' }</strong></div><div><span>Address from label</span><strong>{fullAddress({ address_line_1: order.extraction.address_line_1, address_line_2: order.extraction.address_line_2, city: order.extraction.city, state: order.extraction.state, postal_code: order.extraction.postal_code, country_code: order.extraction.country })}</strong></div></div>
           <p className="field-help">Signature confirmation visible: {order.extraction.signature_confirmation_visible ? 'Yes' : 'No'}</p>
         </div>}
-        {order.verdict && <VerdictPanel verdict={order.verdict} />}
+        {order.has_label && <figure className="label-figure"><img src={`/api/labels/${encodeURIComponent(order.id)}`} alt="Stored shipping label photo" /><figcaption>Stored label evidence.</figcaption></figure>}
+        <form className="upload-panel" onSubmit={runLabel}>
+          <label htmlFor="label-photo" className="upload-title">{order.verdict?.state === 'AT RISK' ? 'Check a replacement label' : 'Photograph the printed label'}</label>
+          <p className="field-help">The photo is read for recipient, address, carrier, and tracking. Use a clear, flat image.</p>
+          <div className="file-controls"><input id="label-photo" type="file" accept="image/jpeg,image/png" capture="environment" onChange={(e) => setFile(e.target.files?.[0] ?? null)} required={!order.extraction} /><button className="button button-primary" disabled={busy || !file}>{busy ? 'Reading label…' : order.verdict?.state === 'AT RISK' ? 'Check replacement' : 'Check label'}</button></div>
+        </form>
       </section>
       <aside className="address-rail">
         <div className="section-heading"><h2>PayPal order address</h2></div>
         <div className="address-stock"><p className="address-label">Ship to</p><strong>{order.buyer_name || order.id}</strong><address>{addressLines(address).map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}</address><span className="address-source">Read from PayPal Transaction Details</span></div>
-        {order.verdict?.addressDifferences?.length > 0 && <div className="redline-panel"><h3>Address fields differ</h3><ul>{order.verdict.addressDifferences.map((diff: any) => <li key={diff.field}><strong>{diff.field}</strong><span>PayPal: {diff.paypal}</span><span>Label: {diff.label}</span></li>)}</ul><p>The shipping address must match the address on PayPal Transaction Details.</p><a href={order.verdict.policyUrl} target="_blank" rel="noreferrer">Seller Protection policy</a></div>}
-        {setup.paypalEnv !== 'live' && address && <div className="sandbox-card"><p className="overline">Sandbox only</p><h3>Print a test label</h3><p>Uses this PayPal address with a clearly marked test tracking number.</p><div className="stack-buttons"><a className="button button-secondary" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label`}>Print matching label</a><a className="quiet-link" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label?wrongUnit=1`}>Print label with a wrong unit</a></div></div>}
-        {order.extraction && !order.tracker_id && <div className="tracking-action"><button className="button button-primary" disabled={busy || (!protectedPass && !acceptRisk)} onClick={() => void postTracking()}>{busy ? 'Checking PayPal…' : 'Post tracking to PayPal'}</button>
-          {!protectedPass && <label className="risk-override"><input type="checkbox" checked={acceptRisk} onChange={(e) => setAcceptRisk(e.target.checked)} />Ship anyway, I accept the risk</label>}
-          <p className="field-help">The app checks that the tracker appears on the PayPal order before showing it as posted.</p>
-        </div>}
-        {order.tracker_id && <div className="tracker-receipt"><span className="receipt-check" aria-hidden="true">✓</span><div><strong>TRACKING ON PAYPAL</strong><span className="mono">{order.tracker_id}</span><span>Read back at</span><time>{order.tracker_posted_at}</time></div></div>}
+        {setup.paypalEnv !== 'live' && !setup.missing.includes('PAYPAL_CLIENT_ID') && !setup.missing.includes('PAYPAL_CLIENT_SECRET') && address && <div className="sandbox-card"><p className="overline">Sandbox only</p><h3>Print a test label</h3><p>Uses this PayPal address with a clearly marked test tracking number.</p><div className="stack-buttons"><a className="button button-secondary" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label`}>Print matching label</a><a className="quiet-link" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label?wrongUnit=1`}>Print label with a wrong unit</a></div></div>}
       </aside>
     </div>
   </>;
+}
+
+function addressFieldLabel(field: string) {
+  return ({ street: 'Street address', unit: 'Street / unit', line2: 'Address line 2', city: 'City', state: 'State', postal: 'ZIP code', country: 'Country' } as Record<string, string>)[field] ?? field;
 }
 
 function VerdictPanel({ verdict }: { verdict: any }) {
@@ -252,7 +258,7 @@ function VerdictPanel({ verdict }: { verdict: any }) {
   return <section className={`verdict-panel ${good ? 'verdict-good' : 'verdict-risk'}`} aria-live="polite">
     <span className="verdict-stamp" data-verdict={verdict.state}>{good ? 'PROTECTED' : 'AT RISK'}</span><div><h3>{good ? 'Address and tracking checks passed.' : 'Hold the parcel and review the label.'}</h3>
     {verdict.reasons.map((reason: string) => <p key={reason}>{reason}</p>)}
-    <p className="verdict-footnote">Postmark checks the two proof-of-delivery requirements in PayPal's Seller Protection policy: an online, verifiable tracking number and a recipient address that matches PayPal Transaction Details. <a href={verdict.policyUrl} target="_blank" rel="noreferrer">Read the current policy.</a></p></div>
+    {(!good && !verdict.addressDifferences?.length) || good ? <p className="verdict-footnote">Postmark checks the two proof-of-delivery requirements in PayPal's Seller Protection policy: an online, verifiable tracking number and a recipient address that matches PayPal Transaction Details. <a href={verdict.policyUrl} target="_blank" rel="noreferrer">Read the current policy.</a></p> : null}</div>
   </section>;
 }
 
