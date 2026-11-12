@@ -451,3 +451,42 @@ input[type="file"] { padding: 8px; font-size: 14px; }
   .landing-steps li + li { border-top: 1px solid var(--color-rule); }
   .specimen-stamp { position: static; justify-self: end; margin-top: 10px; font-size: 24px; }
 }
+
+/* Label camera step: the core action, styled as one large target instead of the browser file input. */
+.upload-panel .upload-title { margin: 0; font: 500 20px/1.2 var(--font-display); }
+.camera-button { margin-top: 14px; min-height: 72px; display: grid; grid-template-columns: 48px minmax(0, 1fr); align-items: center; gap: 16px; padding: 14px 18px; border: 2px solid var(--color-accent); border-radius: var(--radius-control); background: var(--color-accent); color: var(--color-paper); cursor: pointer; transition: background 120ms ease-out; }
+.camera-button:hover { background: var(--color-accent-dark); border-color: var(--color-accent-dark); }
+#label-photo:focus-visible + .camera-button { outline: 3px solid var(--color-accent); outline-offset: 3px; }
+.camera-glyph { position: relative; width: 48px; height: 36px; border: 2px solid currentColor; border-radius: 6px; }
+.camera-glyph::before { position: absolute; top: -7px; left: 10px; width: 14px; height: 5px; content: ''; border: 2px solid currentColor; border-bottom: 0; border-radius: 2px 2px 0 0; }
+.camera-glyph > span { position: absolute; inset: 0; margin: auto; width: 16px; height: 16px; border: 2px solid currentColor; border-radius: 50%; }
+.camera-text { min-width: 0; display: grid; gap: 2px; }
+.camera-text strong { font: 500 21px/1.15 var(--font-display); letter-spacing: .01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.camera-text > span { font-size: 14px; opacity: .88; }
+.camera-button-ready, .camera-button-quiet { background: var(--color-paper); color: var(--color-ink); border-color: var(--color-ink); }
+.camera-button-ready:hover, .camera-button-quiet:hover { background: var(--color-paper-deep); border-color: var(--color-ink); }
+.camera-button-ready .camera-text strong { font: 600 15px/1.2 var(--font-mono); }
+.check-button { width: 100%; margin-top: 10px; min-height: 52px; font-size: 17px; }
+.upload-panel { margin-top: 20px; }
+.redline-panel + .upload-panel { border-top: 0; padding-top: 4px; }
+.button-risk { border-color: var(--color-risk-rule); color: var(--color-accent-dark); }
+.sandbox-card .button-row { gap: 8px; }
+.tracking-action[data-override] { border-top: 1px dashed var(--color-rule); }
+.tracking-action[data-override] .button { width: auto; }
+.diff-mark { padding: 0 3px; font-weight: 700; font-family: var(--font-mono); }
+.diff-risk { background: var(--color-danger-paper); color: var(--color-accent-dark); outline: 1px solid var(--color-accent); }
+.diff-good { background: var(--color-good-paper); color: var(--color-good); outline: 1px solid #9fb9a6; }
+.redline-row:not(.redline-head) > span:last-child { color: var(--color-ink); }
+.tracker-receipt strong { font: 500 20px/1.1 var(--font-display); letter-spacing: .02em; text-transform: uppercase; }
+.tracker-receipt > div > span:not(.mono) { color: var(--color-ink); font-size: 16px; }
+.tracking-grouped { font-size: 15px !important; font-weight: 600; color: var(--color-good); white-space: nowrap; }
+.tracker-id { color: var(--color-muted); font-size: 11px !important; }
+.label-locked { margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--color-rule); }
+@media (max-width: 640px) {
+  .camera-button { min-height: 76px; padding: 14px; gap: 14px; }
+  .camera-text strong { font-size: 20px; }
+  .sandbox-card .button-row { display: grid; }
+  .sandbox-card .button { width: 100%; }
+  .tracking-grouped { white-space: normal; }
+}
+.tracker-receipt time { color: inherit; font-size: inherit; }

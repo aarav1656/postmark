@@ -357,7 +357,7 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
   const runLabel = async (event: React.FormEvent) => {
     event.preventDefault(); if (!file) return; setBusy(true); setError(''); setNotice('');
     const form = new FormData(); form.append('label', file);
-    try { const result = await api<{ order: Order; verdict: any }>(`/api/orders/${encodeURIComponent(id)}/label`, { method: 'POST', body: form }); setOrder(result.order); setNotice(result.verdict.state === 'PROTECTED' ? 'Address and tracking checks passed.' : 'Review the mismatch before posting tracking.'); await refresh(); }
+    try { const result = await api<{ order: Order; verdict: any }>(`/api/orders/${encodeURIComponent(id)}/label`, { method: 'POST', body: form }); setOrder(result.order); setFile(null); setNotice(result.verdict.state === 'PROTECTED' ? 'Address and tracking checks passed.' : 'Review the mismatch before posting tracking.'); await refresh(); }
     catch (e) { setError(e instanceof Error ? e.message : 'The label could not be checked'); }
     finally { setBusy(false); }
   };
@@ -376,6 +376,18 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
   if (!order) return <div className="loading-panel" role="status">Loading PayPal order…</div>;
   const address = order.address;
   const protectedPass = order.verdict?.state === 'PROTECTED';
+  const atRisk = order.verdict?.state === 'AT RISK';
+  const labelForm = <form className="upload-panel" id="label-check" onSubmit={runLabel}>
+    <p className="upload-title">{atRisk ? 'Check a replacement label' : protectedPass ? 'Label changed? Check it again' : 'Photograph the printed label'}</p>
+    <p className="field-help">Take it before you drop the parcel off. Postmark checks it against the address PayPal holds.</p>
+    <input id="label-photo" className="visually-hidden" type="file" accept="image/jpeg,image/png" capture="environment" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+    <label htmlFor="label-photo" className={`camera-button ${file ? 'camera-button-ready' : ''} ${protectedPass ? 'camera-button-quiet' : ''}`}>
+      <span className="camera-glyph" aria-hidden="true"><span></span></span>
+      <span className="camera-text"><strong>{file ? file.name : atRisk ? 'Photograph the reprinted label' : 'Photograph the label'}</strong><span>{file ? `${Math.max(1, Math.round(file.size / 1024))} KB · tap to retake` : 'Opens the camera on a phone, or choose a photo of the label'}</span></span>
+    </label>
+    {file && <button className="button button-primary check-button" disabled={busy}>{busy ? 'Reading label…' : 'Check this label'}</button>}
+  </form>;
+  const sandboxCard = setup.paypalEnv !== 'live' && !setup.missing.includes('PAYPAL_CLIENT_ID') && !setup.missing.includes('PAYPAL_CLIENT_SECRET') && address ? <div className="sandbox-card"><p className="overline">Sandbox only · no parcel needed</p><h3>Print a test label</h3><p>Prints this PayPal address with a marked test tracking number. Open it, then photograph or upload it above.</p><div className="button-row"><a className="button button-secondary" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label`} target="_blank" rel="noreferrer">Print matching label</a><a className="button button-secondary button-risk" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label?wrongUnit=1`} target="_blank" rel="noreferrer">Print label with a wrong unit</a></div></div> : null;
   return <>
     <div className="breadcrumb"><a href="/orders" onClick={(e) => { e.preventDefault(); nav('/orders'); }}>Orders</a><span aria-hidden="true">/</span><span className="mono">{order.id}</span></div>
     <div className="page-heading"><div><p className="overline">Shipment file</p><h1>{order.buyer_name || 'PayPal order'}</h1><p className="mono">{[order.item_title, order.id].filter(Boolean).join(' · ')} <span className="copy-divider">·</span> {money(order.amount_cents, order.currency)}{order.archived_at ? ' · archived' : ''}</p></div>{!order.verdict && <StatusBadge status={order.protection_state} />}</div>
@@ -383,24 +395,22 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
     <div className="order-detail-grid">
       <section className="workbench">
         <div className="section-heading"><h2>Before you hand it over</h2><span className="section-rule"></span></div>
-        {order.verdict && <>
-          <VerdictPanel verdict={order.verdict} />
-          {order.verdict.addressDifferences?.length > 0 && <div className="redline-panel"><h3>Address fields to fix</h3><p>These values differ from the address PayPal will use for Seller Protection.</p><div className="redline-table" role="table" aria-label="Address fields that differ"><div className="redline-row redline-head" role="row"><span role="columnheader">Field</span><span role="columnheader">PayPal</span><span role="columnheader">Label</span></div>{order.verdict.addressDifferences.map((diff: any) => <div className="redline-row" role="row" key={diff.field}><strong role="rowheader">{addressFieldLabel(diff.field)}</strong><span role="cell">{diff.paypal}</span><span role="cell">{diff.label}</span></div>)}</div><a href={order.verdict.policyUrl} target="_blank" rel="noreferrer">Seller Protection policy</a></div>}
-          {order.extraction && !order.tracker_id && <div className="tracking-action"><button className="button button-primary" disabled={busy || (!protectedPass && !acceptRisk)} onClick={() => void postTracking()}>{busy ? 'Checking PayPal…' : 'Post tracking to PayPal'}</button>
-            {!protectedPass && <label className="risk-override"><input type="checkbox" checked={acceptRisk} onChange={(e) => setAcceptRisk(e.target.checked)} />Ship anyway, I accept the risk</label>}
-            <p className="field-help">Postmark checks PayPal’s order after posting. Tracking appears here only after PayPal confirms it.</p>
-          </div>}
-          {order.tracker_id && <div className="tracker-receipt"><span className="receipt-check" aria-hidden="true">✓</span><div><strong>TRACKING ON PAYPAL</strong><span className="mono">{order.tracker_id}</span><span>Read back at</span><time>{order.tracker_posted_at}</time></div></div>}
-        </>}
+        {order.verdict && <VerdictPanel verdict={order.verdict} />}
+        {order.verdict?.addressDifferences?.length > 0 && <div className="redline-panel"><h3>Address fields to fix</h3><p>Reprint the label with PayPal's value. Seller Protection compares these fields with Transaction Details.</p><div className="redline-table" role="table" aria-label="Address fields that differ"><div className="redline-row redline-head" role="row"><span role="columnheader">Field</span><span role="columnheader">PayPal</span><span role="columnheader">Label</span></div>{order.verdict.addressDifferences.map((diff: any) => { const parts = diffWords(diff.paypal ?? '', diff.label ?? ''); return <div className="redline-row" role="row" key={diff.field}><strong role="rowheader">{addressFieldLabel(diff.field)}</strong><span role="cell"><Marked parts={parts.paypal} kind="good" /></span><span role="cell"><Marked parts={parts.label} kind="risk" /></span></div>; })}</div><a href={order.verdict.policyUrl} target="_blank" rel="noreferrer">Seller Protection policy</a></div>}
+        {!order.tracker_id && (!order.verdict || atRisk) && labelForm}
+        {order.extraction && !order.tracker_id && <div className="tracking-action" data-override={atRisk || undefined}>
+          {!protectedPass && <label className="risk-override"><input type="checkbox" checked={acceptRisk} onChange={(e) => setAcceptRisk(e.target.checked)} />Ship anyway, I accept the risk</label>}
+          {(protectedPass || acceptRisk) && <button className={`button ${protectedPass ? 'button-primary' : 'button-secondary'}`} disabled={busy} onClick={() => void postTracking()}>{busy ? 'Checking PayPal…' : protectedPass ? 'Send tracking to PayPal' : 'Send tracking anyway'}</button>}
+          <p className="field-help">{protectedPass ? 'Postmark reads the PayPal order back after posting. Tracking shows here only after PayPal confirms it.' : 'Your choice to ship with a mismatched label is recorded with this order.'}</p>
+        </div>}
+        {order.tracker_id && <div className="tracker-receipt"><span className="receipt-check" aria-hidden="true">✓</span><div><strong>On PayPal</strong><span>Tracking <span className="mono tracking-grouped">{groupTracking(order.tracking_number ?? order.extraction?.tracking_number ?? '')}</span> is on this PayPal order. PayPal confirmed it{order.tracker_posted_at ? <> at <time dateTime={order.tracker_posted_at}>{formatTime(order.tracker_posted_at)}</time></> : null}.</span><span className="mono tracker-id">Tracker {order.tracker_id}</span></div></div>}
         {order.extraction && <div className="extraction-card"><div className="extraction-heading"><h3>What the label says</h3><span>{Math.round(order.extraction.confidence * 100)}% read confidence</span></div>
-          <div className="extraction-fields"><div><span>Carrier</span><strong>{order.extraction.carrier}{order.extraction.service ? ` · ${order.extraction.service}` : ''}</strong></div><div><span>Tracking number</span><strong className="mono">{order.extraction.tracking_number}</strong></div><div><span>Recipient</span><strong>{order.extraction.recipient_name || 'Unreadable on this label' }</strong></div><div><span>Address from label</span><strong>{fullAddress({ address_line_1: order.extraction.address_line_1, address_line_2: order.extraction.address_line_2, city: order.extraction.city, state: order.extraction.state, postal_code: order.extraction.postal_code, country_code: order.extraction.country })}</strong></div></div>
+          <div className="extraction-fields"><div><span>Carrier</span><strong>{order.extraction.carrier}{order.extraction.service ? ` · ${order.extraction.service}` : ''}</strong></div><div><span>Tracking number</span><strong className="mono">{groupTracking(order.extraction.tracking_number ?? '')}</strong></div><div><span>Recipient</span><strong>{order.extraction.recipient_name || 'Unreadable on this label' }</strong></div><div><span>Address from label</span><strong>{fullAddress({ address_line_1: order.extraction.address_line_1, address_line_2: order.extraction.address_line_2, city: order.extraction.city, state: order.extraction.state, postal_code: order.extraction.postal_code, country_code: order.extraction.country })}</strong></div></div>
           <p className="field-help">Signature confirmation visible: {order.extraction.signature_confirmation_visible ? 'Yes' : 'No'}</p>
         </div>}
-        <form className="upload-panel" onSubmit={runLabel}>
-          <label htmlFor="label-photo" className="upload-title">{order.verdict?.state === 'AT RISK' ? 'Check a replacement label' : 'Photograph the printed label'}</label>
-          <p className="field-help">The photo is read for recipient, address, carrier, and tracking. Use a clear, flat image.</p>
-          <div className="file-controls"><input id="label-photo" type="file" accept="image/jpeg,image/png" capture="environment" onChange={(e) => setFile(e.target.files?.[0] ?? null)} required={!order.extraction} /><button className="button button-primary" disabled={busy || !file}>{busy ? 'Reading label…' : order.verdict?.state === 'AT RISK' ? 'Check replacement' : 'Check label'}</button></div>
-        </form>
+        {!order.tracker_id && protectedPass && labelForm}
+        {order.tracker_id && <p className="field-help label-locked">The label is locked as shipment evidence now that tracking is on PayPal.</p>}
+        {!order.tracker_id && sandboxCard}
       </section>
       <aside className="address-rail">
         <div className="section-heading"><h2>Label evidence</h2></div>
@@ -409,21 +419,45 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
         {order.listing_id && <a className="item-chip" href={`/item/${encodeURIComponent(order.listing_id)}`} onClick={(e) => { e.preventDefault(); nav(`/item/${encodeURIComponent(order.listing_id!)}`); }}><img src={listingPhoto(order.listing_id, 160)} alt="" /><span><span className="overline">Item sold</span><strong>{order.item_title}</strong></span></a>}
         <div className="section-heading rail-gap"><h2>PayPal order address</h2></div>
         <div className="address-stock"><p className="address-label">Ship to</p><strong>{order.buyer_name || order.id}</strong><address>{addressLines(address).map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}</address><span className="address-source">Read from PayPal Transaction Details</span></div>
-        {setup.paypalEnv !== 'live' && !setup.missing.includes('PAYPAL_CLIENT_ID') && !setup.missing.includes('PAYPAL_CLIENT_SECRET') && address && <div className="sandbox-card"><p className="overline">Sandbox only</p><h3>Print a test label</h3><p>Uses this PayPal address with a clearly marked test tracking number.</p><div className="stack-buttons"><a className="button button-secondary" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label`}>Print matching label</a><a className="quiet-link" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label?wrongUnit=1`}>Print label with a wrong unit</a></div></div>}
         <div className="archive-control"><button className="button button-quiet" disabled={busy} onClick={() => void archive(!order.archived_at)}>{order.archived_at ? 'Restore to the desk' : 'Archive this order'}</button><p className="field-help">{order.archived_at ? 'Archived orders stay out of the desk and its totals.' : 'Archiving hides the order from the desk and its totals. PayPal keeps the order.'}</p></div>
       </aside>
     </div>
   </>;
 }
 
+const groupTracking = (value: string) => value.replace(/\s+/g, '').replace(/(.{4})(?=.)/g, '$1 ');
+const formatTime = (value: string) => { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); };
+type WordPart = { text: string; changed: boolean };
+function diffWords(paypal: string, label: string) {
+  const a = paypal.split(/\s+/).filter(Boolean); const b = label.split(/\s+/).filter(Boolean);
+  let start = 0; while (start < a.length && start < b.length && a[start].toLowerCase() === b[start].toLowerCase()) start++;
+  let end = 0; while (end < a.length - start && end < b.length - start && a[a.length - 1 - end].toLowerCase() === b[b.length - 1 - end].toLowerCase()) end++;
+  const split = (words: string[]): WordPart[] => [
+    { text: words.slice(0, start).join(' '), changed: false },
+    { text: words.slice(start, words.length - end).join(' '), changed: true },
+    { text: words.slice(words.length - end).join(' '), changed: false },
+  ].filter((part) => part.text);
+  return { paypal: split(a), label: split(b), paypalChanged: a.slice(start, a.length - end).join(' '), labelChanged: b.slice(start, b.length - end).join(' ') };
+}
+function Marked({ parts, kind }: { parts: WordPart[]; kind: 'good' | 'risk' }) {
+  return <>{parts.map((part, index) => <React.Fragment key={index}>{index > 0 ? ' ' : ''}{part.changed ? <mark className={`diff-mark diff-${kind}`}>{part.text}</mark> : part.text}</React.Fragment>)}</>;
+}
+
 function addressFieldLabel(field: string) {
-  return ({ street: 'Street address', unit: 'Street / unit', line2: 'Address line 2', city: 'City', state: 'State', postal: 'ZIP code', country: 'Country' } as Record<string, string>)[field] ?? field;
+  return ({ street: 'Street address', unit: 'Unit', line2: 'Address line 2', city: 'City', state: 'State', postal: 'ZIP code', country: 'Country' } as Record<string, string>)[field] ?? field;
+}
+
+function riskHeadline(verdict: any) {
+  const diff = verdict.addressDifferences?.[0];
+  if (!diff) return verdict.trackingValid === false ? 'The tracking number is not in a valid carrier format. Hold the parcel.' : 'Hold the parcel and review the label.';
+  const words = diffWords(diff.paypal ?? '', diff.label ?? '');
+  return `${addressFieldLabel(diff.field)} on the label is ${words.labelChanged || 'missing'}. PayPal has ${words.paypalChanged || 'nothing'}.${verdict.addressDifferences.length > 1 ? ` ${verdict.addressDifferences.length - 1} more ${verdict.addressDifferences.length === 2 ? 'field differs' : 'fields differ'}.` : ''}`;
 }
 
 function VerdictPanel({ verdict }: { verdict: any }) {
   const good = verdict.state === 'PROTECTED';
   return <section className={`verdict-panel ${good ? 'verdict-good' : 'verdict-risk'}`} aria-live="polite">
-    <span className="verdict-stamp" data-verdict={verdict.state}>{good ? 'PROTECTED' : 'AT RISK'}</span><div><h3>{good ? 'Address and tracking checks passed.' : 'Hold the parcel and review the label.'}</h3>
+    <span className="verdict-stamp" data-verdict={verdict.state}>{good ? 'PROTECTED' : 'AT RISK'}</span><div><h3>{good ? 'Address and tracking match PayPal’s record for this order.' : riskHeadline(verdict)}</h3>
     {verdict.reasons.map((reason: string) => <p key={reason}>{reason}</p>)}
     {(!good && !verdict.addressDifferences?.length) || good ? <p className="verdict-footnote">Postmark checks the two proof-of-delivery requirements in PayPal's Seller Protection policy: an online, verifiable tracking number and a recipient address that matches PayPal Transaction Details. <a href={verdict.policyUrl} target="_blank" rel="noreferrer">Read the current policy.</a></p> : null}</div>
   </section>;
