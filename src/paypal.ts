@@ -36,8 +36,12 @@ export async function paypal<T>(path: string, init: RequestInit = {}, requestId?
   const response = await fetch(`${base()}${path}`, { ...init, headers, signal: init.signal ?? AbortSignal.timeout(30_000) });
   if (!response.ok) {
     const debugId = response.headers.get('paypal-debug-id');
-    console.error('PayPal request failed', { status: response.status, debugId, path });
-    throw new PayPalError(`PayPal request failed (${response.status})${debugId ? `, debug ${debugId}` : ''}`, response.status, debugId);
+    // PayPal error bodies carry name, message and details[].issue; never headers or tokens.
+    const body = await response.json().catch(() => null) as { name?: string; message?: string; details?: Array<{ issue?: string; field?: string }> } | null;
+    const issues = (body?.details ?? []).map((detail) => [detail.issue, detail.field].filter(Boolean).join(' at ')).filter(Boolean);
+    console.error('PayPal request failed', { status: response.status, debugId, path, name: body?.name ?? null, message: body?.message ?? null, issues });
+    const reason = [body?.name, ...issues].filter(Boolean).join(': ');
+    throw new PayPalError(`PayPal request failed (${response.status})${reason ? ` ${reason}` : ''}${debugId ? `, debug ${debugId}` : ''}`, response.status, debugId);
   }
   if (response.status === 204) return undefined as T;
   return await response.json() as T;
