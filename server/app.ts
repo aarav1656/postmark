@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import sharp from 'sharp';
 import { db } from './db.ts';
 import { publish, subscribe } from './events.ts';
 import { clearSessionCookie, createSessionCookie, hasSession } from './session.ts';
@@ -25,6 +26,9 @@ app.use('/api/*', cors({ origin: frontendOrigin, allowMethods: ['GET', 'POST', '
 const dataDir = process.env.DATA_DIR || './data';
 const labelsDir = join(dataDir, 'labels');
 mkdirSync(labelsDir, { recursive: true });
+const listingsDir = join(dataDir, 'listings');
+mkdirSync(listingsDir, { recursive: true });
+const publicUrl = () => process.env.PUBLIC_URL || 'http://localhost:8787';
 
 const missingEnv = () => [
   !process.env.PAYPAL_CLIENT_ID && 'PAYPAL_CLIENT_ID',
@@ -45,11 +49,35 @@ const getOrder = (id: string) => {
     verdict: row.verdict_json ? JSON.parse(row.verdict_json) : null,
   };
 };
+const orderSelect = 'SELECT orders.*, listings.title AS item_title FROM orders LEFT JOIN listings ON listings.id = orders.listing_id';
+const serializeOrder = (row: Record<string, any>) => {
+  const { address_json, extraction_json, verdict_json, label_path, ...fields } = row;
+  return {
+    ...fields,
+    address: address_json ? JSON.parse(address_json) : null,
+    extraction: extraction_json ? JSON.parse(extraction_json) : null,
+    verdict: verdict_json ? JSON.parse(verdict_json) : null,
+    has_label: Boolean(label_path),
+  };
+};
 const publicOrder = (id: string) => {
-  const order = getOrder(id);
-  if (!order) return null;
-  const { address_json, extraction_json, verdict_json, label_path, ...fields } = order;
-  return { ...fields, has_label: Boolean(label_path) };
+  const row = db.prepare(`${orderSelect} WHERE orders.id=?`).get(id) as Record<string, any> | undefined;
+  return row ? serializeOrder(row) : null;
+};
+const getListing = (id: string) => db.prepare('SELECT * FROM listings WHERE id=?').get(id) as
+  { id: string; title: string; description: string; price_cents: number; currency: string; photo_path: string; created_at: string } | undefined;
+const publicListing = ({ photo_path, ...listing }: NonNullable<ReturnType<typeof getListing>>) => listing;
+const sendImage = async (c: any, path: string, width: string | undefined, cacheControl: string) => {
+  if (!existsSync(path)) return c.json({ error: 'Image is unavailable' }, 404);
+  const target = Number(width);
+  c.header('Cache-Control', cacheControl);
+  // ponytail: resized on every request; cache thumbnails on disk if order volume makes this slow.
+  if (Number.isInteger(target) && target >= 64 && target <= 1600) {
+    c.header('Content-Type', 'image/jpeg');
+    return c.body(await sharp(path).rotate().resize({ width: target, withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer());
+  }
+  c.header('Content-Type', extname(path).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg');
+  return c.body(readFileSync(path));
 };
 const toCents = (value: unknown) => {
   if (typeof value !== 'string' && typeof value !== 'number') return 0;
@@ -74,16 +102,17 @@ const fromPaypalOrder = (order: any) => {
     currency: capture?.amount?.currency_code ?? unit.amount?.currency_code ?? 'USD',
     buyerName: shipping.name?.full_name ?? ([order.payer?.name?.given_name, order.payer?.name?.surname].filter(Boolean).join(' ') || null),
     address,
+    listingId: typeof unit.custom_id === 'string' && unit.custom_id.startsWith('listing:') ? unit.custom_id.slice('listing:'.length) : null,
     protectionState: capture?.dispute_outcome?.outcome_code ?? (order.status === 'COMPLETED' ? 'UNSHIPPED' : 'UNSHIPPED'),
   };
 };
 const savePaypalOrder = (order: any) => {
   const value = fromPaypalOrder(order);
-  db.prepare(`INSERT INTO orders(id,capture_id,status,amount_cents,currency,buyer_name,address_json,protection_state,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+  db.prepare(`INSERT INTO orders(id,capture_id,status,amount_cents,currency,buyer_name,address_json,protection_state,listing_id,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
     ON CONFLICT(id) DO UPDATE SET capture_id=excluded.capture_id,status=excluded.status,amount_cents=excluded.amount_cents,currency=excluded.currency,
-    buyer_name=excluded.buyer_name,address_json=COALESCE(excluded.address_json,orders.address_json),updated_at=CURRENT_TIMESTAMP`).run(
-    value.id, value.captureId, value.status, value.amountCents, value.currency, value.buyerName, value.address ? JSON.stringify(value.address) : null, value.protectionState,
+    buyer_name=excluded.buyer_name,address_json=COALESCE(excluded.address_json,orders.address_json),listing_id=COALESCE(excluded.listing_id,orders.listing_id),updated_at=CURRENT_TIMESTAMP`).run(
+    value.id, value.captureId, value.status, value.amountCents, value.currency, value.buyerName, value.address ? JSON.stringify(value.address) : null, value.protectionState, value.listingId,
   );
   publish({ type: 'orders', id: value.id });
   return publicOrder(value.id);
@@ -112,7 +141,7 @@ app.post('/api/session', async (c) => {
 app.post('/api/session/logout', (c) => { c.header('Set-Cookie', clearSessionCookie(secureCookie())); return c.json({ authenticated: false }); });
 app.use('/api/*', async (c, next) => {
   const path = new URL(c.req.url).pathname;
-  if (path === '/api/health' || path === '/api/session' || path === '/api/session/logout' || path === '/api/webhooks/paypal') return next();
+  if (path === '/api/health' || path === '/api/session' || path === '/api/session/logout' || path === '/api/webhooks/paypal' || path.startsWith('/api/public/')) return next();
   if (!hasSession(c.req.header('cookie'), process.env.APP_PASSWORD || '')) return c.json({ error: 'Enter the Postmark access password to continue.' }, 401);
   await next();
 });
@@ -134,9 +163,14 @@ app.get('/api/events', (c) => streamSSE(c, async (stream) => {
   }
 }));
 
-app.get('/api/orders', (c) => {
-  const orders = db.prepare('SELECT * FROM orders ORDER BY updated_at DESC').all() as Array<Record<string, any>>;
-  return c.json(orders.map((row) => { const { address_json, extraction_json, verdict_json, label_path, ...fields } = row; return { ...fields, address: address_json ? JSON.parse(address_json) : null, extraction: extraction_json ? JSON.parse(extraction_json) : null, verdict: verdict_json ? JSON.parse(verdict_json) : null, has_label: Boolean(label_path) }; }));
+app.get('/api/orders', (c) => c.json((db.prepare(`${orderSelect} ORDER BY orders.updated_at DESC`).all() as Array<Record<string, any>>).map(serializeOrder)));
+app.post('/api/orders/:id/archive', async (c) => {
+  const body = z.object({ archived: z.boolean() }).safeParse(await c.req.json().catch(() => ({})));
+  if (!body.success) return c.json({ error: 'Choose whether to archive or restore this order.' }, 400);
+  const result = db.prepare('UPDATE orders SET archived_at=CASE WHEN ? THEN COALESCE(archived_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=?').run(body.data.archived ? 1 : 0, c.req.param('id'));
+  if (result.changes !== 1) return c.json({ error: 'Order has not been added to Postmark' }, 404);
+  publish({ type: 'orders', id: c.req.param('id') });
+  return c.json(publicOrder(c.req.param('id')));
 });
 app.get('/api/orders/:id', (c) => {
   const order = getOrder(c.req.param('id'));
@@ -151,49 +185,91 @@ app.post('/api/orders/import', async (c) => {
   catch (error) { return c.json({ error: error instanceof Error ? error.message : 'PayPal order lookup failed' }, 502); }
 });
 
-app.post('/api/shop/create', async (c) => {
+const imageTypes = ['image/jpeg', 'image/png', 'image/webp'];
+app.post('/api/listings', async (c) => {
+  const form = await c.req.formData().catch(() => null);
+  const photo = form?.get('photo');
+  const fields = z.object({
+    title: z.string().trim().min(3).max(120),
+    price: z.string().trim().regex(/^\d+(?:\.\d{1,2})?$/),
+    description: z.string().trim().min(1).max(2000),
+  }).safeParse({ title: form?.get('title'), price: form?.get('price'), description: form?.get('description') });
+  if (!fields.success) return c.json({ error: 'Enter a title, a price, and a description for the item.' }, 400);
+  const cents = toCents(fields.data.price);
+  if (cents < 100 || cents > 10_000_000) return c.json({ error: 'Price must be between $1.00 and $100,000.00.' }, 400);
+  if (!(photo instanceof File) || !imageTypes.includes(photo.type) || photo.size < 1 || photo.size > 15 * 1024 * 1024) {
+    return c.json({ error: 'Add a JPEG, PNG, or WebP photo of the item under 15 MB.' }, 400);
+  }
+  const id = randomUUID();
+  const photoPath = join(listingsDir, `${id}.jpg`);
+  try {
+    const image = await sharp(Buffer.from(await photo.arrayBuffer())).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 84, mozjpeg: true }).toBuffer();
+    writeFileSync(photoPath, image);
+  } catch { return c.json({ error: 'The item photo could not be read. Try another JPEG or PNG.' }, 400); }
+  db.prepare('INSERT INTO listings(id,title,description,price_cents,currency,photo_path) VALUES(?,?,?,?,?,?)').run(id, fields.data.title, fields.data.description, cents, 'USD', photoPath);
+  return c.json(publicListing(getListing(id)!), 201);
+});
+app.get('/api/listings', (c) => c.json(db.prepare(`SELECT listings.id,listings.title,listings.description,listings.price_cents,listings.currency,listings.created_at,
+  COUNT(orders.capture_id) AS sold_count FROM listings LEFT JOIN orders ON orders.listing_id = listings.id GROUP BY listings.id ORDER BY listings.created_at DESC`).all()));
+
+app.get('/api/public/listings/:id', (c) => {
+  const listing = getListing(c.req.param('id'));
+  return listing ? c.json(publicListing(listing)) : c.json({ error: 'This item is no longer listed.' }, 404);
+});
+app.get('/api/public/listings/:id/photo', async (c) => {
+  const listing = getListing(c.req.param('id'));
+  if (!listing) return c.json({ error: 'This item is no longer listed.' }, 404);
+  return sendImage(c, listing.photo_path, c.req.query('w'), 'public, max-age=86400');
+});
+app.post('/api/public/listings/:id/checkout', async (c) => {
   const unavailable = requirePaypal(c); if (unavailable) return unavailable;
-  const body = z.object({ name: z.string().trim().min(1).max(120), price: z.string().regex(/^\d+(?:\.\d{1,2})?$/), requestKey: z.string().uuid() }).safeParse(await c.req.json());
-  if (!body.success) return c.json({ error: 'Enter an item name and a valid price.' }, 400);
-  const cents = toCents(body.data.price);
-  if (cents < 1 || cents > 10_000_000) return c.json({ error: 'Price must be between $0.01 and $100,000.00.' }, 400);
+  const listing = getListing(c.req.param('id'));
+  if (!listing) return c.json({ error: 'This item is no longer listed.' }, 404);
+  const body = z.object({ requestKey: z.string().uuid() }).safeParse(await c.req.json().catch(() => ({})));
+  if (!body.success) return c.json({ error: 'Missing checkout request key.' }, 400);
   const operationId = `create-order:${body.data.requestKey}`;
   const op = beginOperation(operationId, 'create-order');
+  const approvalUrl = (order: any) => order.links?.find((link: any) => link.rel === 'payer-action')?.href;
   try {
-    if (op.done && op.entityId) {
-      const order = await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(op.entityId)}`);
-      savePaypalOrder(order);
-      return c.json({ id: order.id, status: order.status, approvalUrl: order.links?.find((link: any) => link.rel === 'payer-action')?.href });
-    }
+    if (op.done && op.entityId) return c.json({ id: op.entityId, approvalUrl: approvalUrl(await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(op.entityId)}`)) });
+    const value = { currency_code: listing.currency, value: (listing.price_cents / 100).toFixed(2) };
+    const itemPage = `${publicUrl()}/item/${encodeURIComponent(listing.id)}`;
     const order = await paypal<any>('/v2/checkout/orders', {
       method: 'POST', body: JSON.stringify({
-        intent: 'CAPTURE', purchase_units: [{ reference_id: body.data.requestKey, description: body.data.name, amount: { currency_code: 'USD', value: (cents / 100).toFixed(2) } }],
-        payment_source: { paypal: { experience_context: { return_url: `${process.env.PUBLIC_URL || 'http://localhost:8787'}/shop?capture=1`, cancel_url: `${process.env.PUBLIC_URL || 'http://localhost:8787'}/shop?cancelled=1`, user_action: 'PAY_NOW', shipping_preference: 'GET_FROM_FILE', brand_name: 'Postmark' } } },
+        intent: 'CAPTURE',
+        purchase_units: [{
+          reference_id: body.data.requestKey, custom_id: `listing:${listing.id}`, description: listing.title.slice(0, 127),
+          amount: { ...value, breakdown: { item_total: value } },
+          items: [{ name: listing.title.slice(0, 127), quantity: '1', unit_amount: value, category: 'PHYSICAL_GOODS' }],
+        }],
+        payment_source: { paypal: { experience_context: { return_url: `${itemPage}?capture=1`, cancel_url: `${itemPage}?cancelled=1`, user_action: 'PAY_NOW', shipping_preference: 'GET_FROM_FILE', brand_name: 'Postmark' } } },
       }),
     }, op.requestId);
     const readback = await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(order.id)}`);
     if (readback.id !== order.id) throw new Error('PayPal order read-back did not match the created order');
     finishOperation(operationId, order.id);
-    savePaypalOrder(readback);
-    return c.json({ id: readback.id, status: readback.status, approvalUrl: readback.links?.find((link: any) => link.rel === 'payer-action')?.href });
+    return c.json({ id: readback.id, approvalUrl: approvalUrl(readback) });
   } catch (error) { failOperation(operationId, error); return c.json({ error: error instanceof Error ? error.message : 'PayPal order creation failed' }, 502); }
 });
-
-app.post('/api/shop/capture', async (c) => {
+app.post('/api/public/listings/:id/capture', async (c) => {
   const unavailable = requirePaypal(c); if (unavailable) return unavailable;
-  const body = z.object({ orderId: z.string().min(1).max(36) }).safeParse(await c.req.json());
+  const body = z.object({ orderId: z.string().min(1).max(36) }).safeParse(await c.req.json().catch(() => ({})));
   if (!body.success) return c.json({ error: 'Missing PayPal order id.' }, 400);
-  const operationId = `capture-order:${body.data.orderId}`;
-  const op = beginOperation(operationId, 'capture-order');
+  const orderPath = `/v2/checkout/orders/${encodeURIComponent(body.data.orderId)}`;
   try {
-    if (!op.done) {
-      await paypal(`/v2/checkout/orders/${encodeURIComponent(body.data.orderId)}/capture`, { method: 'POST', body: '{}' }, op.requestId);
-    }
-    const readback = await paypal<any>(`/v2/checkout/orders/${encodeURIComponent(body.data.orderId)}`);
-    if (readback.status !== 'COMPLETED' || !readback.purchase_units?.[0]?.payments?.captures?.[0]?.id) throw new Error(`Capture is not complete. PayPal order status: ${readback.status}`);
-    finishOperation(operationId, body.data.orderId);
-    return c.json(savePaypalOrder(readback));
-  } catch (error) { failOperation(operationId, error); return c.json({ error: error instanceof Error ? error.message : 'PayPal capture failed' }, 502); }
+    const before = await paypal<any>(orderPath);
+    if (before.purchase_units?.[0]?.custom_id !== `listing:${c.req.param('id')}`) return c.json({ error: 'This PayPal order is not for this item.' }, 404);
+    const operationId = `capture-order:${body.data.orderId}`;
+    const op = beginOperation(operationId, 'capture-order');
+    try {
+      if (!op.done && before.status !== 'COMPLETED') await paypal(`${orderPath}/capture`, { method: 'POST', body: '{}' }, op.requestId);
+      const readback = await paypal<any>(orderPath);
+      if (readback.status !== 'COMPLETED' || !readback.purchase_units?.[0]?.payments?.captures?.[0]?.id) throw new Error(`Payment is not complete. PayPal order status: ${readback.status}`);
+      finishOperation(operationId, body.data.orderId);
+      savePaypalOrder(readback);
+      return c.json({ id: readback.id, status: readback.status });
+    } catch (error) { failOperation(operationId, error); throw error; }
+  } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'PayPal capture failed' }, 502); }
 });
 
 app.post('/api/orders/:id/label', async (c) => {
@@ -368,12 +444,10 @@ app.post('/api/webhooks/paypal', async (c) => {
   return c.json({ received: true });
 });
 
-app.get('/api/labels/:id', (c) => {
+app.get('/api/labels/:id', async (c) => {
   const order = getOrder(c.req.param('id'));
-  if (!order?.label_path || !existsSync(order.label_path)) return c.json({ error: 'Stored label is unavailable' }, 404);
-  const ext = extname(order.label_path).toLowerCase();
-  c.header('Content-Type', ext === '.png' ? 'image/png' : 'image/jpeg');
-  return c.body(readFileSync(order.label_path));
+  if (!order?.label_path) return c.json({ error: 'Stored label is unavailable' }, 404);
+  return sendImage(c, order.label_path, c.req.query('w'), 'private, no-cache');
 });
 
 export async function reconcileDisputes() {

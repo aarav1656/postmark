@@ -16,3 +16,4 @@ BUILD-REPORT.md
 # internal build contract and agent context
 docs/COMMON-SPEC.md
 .agentctx/
+.uicraft-read.json
