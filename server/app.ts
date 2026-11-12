@@ -129,21 +129,43 @@ const requirePaypal = (c: any) => {
 app.get('/api/health', (c) => c.json({ ok: true, missing: missingEnv() }));
 const secureCookie = () => (process.env.PUBLIC_URL || '').startsWith('https://');
 app.get('/api/session', (c) => c.json({ configured: Boolean(process.env.APP_PASSWORD), authenticated: hasSession(c.req.header('cookie'), process.env.APP_PASSWORD || '') }));
+// Judge access is opt-in. JUDGE_PASSWORD is a second password accepted at sign-in; DEMO_MODE=1 adds a
+// one-click judge entry on sandbox. Both issue the same session cookie, still signed with APP_PASSWORD.
+const passwordMatches = (supplied: string, expected: string | undefined) => {
+  if (!expected) return false;
+  const a = Buffer.from(supplied); const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+};
+export const demoModeEnabled = () => process.env.DEMO_MODE === '1' && process.env.PAYPAL_ENV !== 'live' && Boolean(process.env.APP_PASSWORD);
 app.post('/api/session', async (c) => {
   const password = process.env.APP_PASSWORD;
   if (!password) return c.json({ error: 'Set APP_PASSWORD to protect this Postmark instance.' }, 503);
   const body = z.object({ password: z.string().min(1) }).safeParse(await c.req.json().catch(() => ({})));
   if (!body.success) return c.json({ error: 'Enter the Postmark access password.' }, 400);
-  const supplied = Buffer.from(body.data.password);
-  const expected = Buffer.from(password);
-  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return c.json({ error: 'The access password did not match.' }, 401);
+  if (!passwordMatches(body.data.password, password) && !passwordMatches(body.data.password, process.env.JUDGE_PASSWORD)) return c.json({ error: 'The access password did not match.' }, 401);
   c.header('Set-Cookie', createSessionCookie(password, secureCookie()));
   return c.json({ authenticated: true });
+});
+app.post('/api/session/judge', (c) => {
+  if (!demoModeEnabled()) return c.json({ error: 'Judge entry is not enabled on this Postmark instance.' }, 404);
+  c.header('Set-Cookie', createSessionCookie(process.env.APP_PASSWORD!, secureCookie()));
+  return c.json({ authenticated: true, judge: true });
+});
+app.get('/api/public/entry', (c) => {
+  const pinned = process.env.DEMO_LISTING_ID ? getListing(process.env.DEMO_LISTING_ID) : undefined;
+  const listing = pinned ?? (db.prepare('SELECT * FROM listings ORDER BY created_at DESC, rowid DESC LIMIT 1').get() as ReturnType<typeof getListing>);
+  return c.json({
+    demoMode: demoModeEnabled(),
+    judgePassword: Boolean(process.env.JUDGE_PASSWORD),
+    paypalEnv: process.env.PAYPAL_ENV || 'sandbox',
+    demoBuyerEmail: demoModeEnabled() ? process.env.DEMO_BUYER_EMAIL || null : null,
+    demoListing: listing ? publicListing(listing) : null,
+  });
 });
 app.post('/api/session/logout', (c) => { c.header('Set-Cookie', clearSessionCookie(secureCookie())); return c.json({ authenticated: false }); });
 app.use('/api/*', async (c, next) => {
   const path = new URL(c.req.url).pathname;
-  if (path === '/api/health' || path === '/api/session' || path === '/api/session/logout' || path === '/api/webhooks/paypal' || path.startsWith('/api/public/')) return next();
+  if (path === '/api/health' || path === '/api/session' || path === '/api/session/logout' || path === '/api/session/judge' || path === '/api/webhooks/paypal' || path.startsWith('/api/public/')) return next();
   if (!hasSession(c.req.header('cookie'), process.env.APP_PASSWORD || '')) return c.json({ error: 'Enter the Postmark access password to continue.' }, 401);
   await next();
 });

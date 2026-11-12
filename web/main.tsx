@@ -11,6 +11,7 @@ type Order = {
   listing_id: string | null; item_title: string | null; archived_at: string | null; updated_at: string;
 };
 type Listing = { id: string; title: string; description: string; price_cents: number; currency: string; created_at: string; sold_count?: number };
+type Entry = { demoMode: boolean; judgePassword: boolean; paypalEnv: string; demoBuyerEmail: string | null; demoListing: Listing | null };
 type Dispute = { id: string; order_id: string | null; status: string; reason: string | null; due_at: string | null; details_json: string };
 
 const money = (cents: number, currency = 'USD') => new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(cents / 100);
@@ -24,6 +25,13 @@ const nav = (path: string) => { history.pushState({}, '', path); window.dispatch
 const addressLines = (address: Address | null) => address ? [address.address_line_1, address.address_line_2, address.city, [address.state, address.postal_code].filter(Boolean).join(' '), address.country_code].filter(Boolean) : [];
 const fullAddress = (address: Address | null) => addressLines(address).join(', ');
 
+function useEntry() {
+  const [entry, setEntry] = useState<Entry | null>(null);
+  useEffect(() => { void api<Entry>('/api/public/entry').then(setEntry).catch(() => setEntry({ demoMode: false, judgePassword: false, paypalEnv: 'sandbox', demoBuyerEmail: null, demoListing: null })); }, []);
+  return entry;
+}
+const enterAsJudge = async () => { await api('/api/session/judge', { method: 'POST' }); location.assign('/orders'); };
+
 function useRoute() {
   const [path, setPath] = useState(location.pathname + location.search);
   useEffect(() => { const update = () => setPath(location.pathname + location.search); addEventListener('popstate', update); return () => removeEventListener('popstate', update); }, []);
@@ -32,8 +40,10 @@ function useRoute() {
 
 function Root() {
   const route = useRoute();
-  const item = route.split('?')[0].match(/^\/item\/([^/]+)$/);
-  return item ? <BuyerPage id={decodeURIComponent(item[1])} /> : <App />;
+  const path = route.split('?')[0];
+  const item = path.match(/^\/item\/([^/]+)$/);
+  if (path === '/') return <Landing />;
+  return item ? <BuyerPage key={item[1]} id={decodeURIComponent(item[1])} /> : <App />;
 }
 
 function App() {
@@ -63,7 +73,7 @@ function App() {
     const source = new EventSource('/api/events'); source.addEventListener('update', () => void refresh()); return () => source.close();
   }, [refresh, authenticated]);
 
-  useEffect(() => { if (location.pathname === '/') nav('/orders'); document.title = `Postmark: ${route.includes('/disputes') ? 'dispute evidence' : route === '/shop' ? 'listings' : route.includes('/orders/') ? 'shipment label check' : 'seller orders'}`; }, [route]);
+  useEffect(() => { document.title = `Postmark: ${route.includes('/disputes') ? 'dispute evidence' : route === '/shop' ? 'listings' : route.includes('/orders/') ? 'shipment label check' : 'seller orders'}`; }, [route]);
 
   const path = route.split('?')[0];
   const orderMatch = path.match(/^\/orders\/([^/]+)$/);
@@ -83,7 +93,7 @@ function App() {
         <a href="/disputes" aria-current={path.startsWith('/disputes') ? 'page' : undefined} onClick={(e) => { e.preventDefault(); nav('/disputes'); }}>Disputes <span className="nav-count">{disputes.length}</span></a>
         <a href="/shop" aria-current={path === '/shop' ? 'page' : undefined} onClick={(e) => { e.preventDefault(); nav('/shop'); }}>Shop</a>
       </nav>
-      <div className="account-mark"><span className={`environment-dot ${setup.paypalEnv === 'live' ? 'live' : ''}`}></span>{setup.paypalEnv}<button className="logout-button" onClick={async () => { await api('/api/session/logout', { method: 'POST' }); setOrders([]); setDisputes([]); setAuthenticated(false); }}>Sign out</button></div>
+      <div className="account-mark"><span className={`environment-dot ${setup.paypalEnv === 'live' ? 'live' : ''}`}></span>{setup.paypalEnv}<button className="logout-button" onClick={async () => { await api('/api/session/logout', { method: 'POST' }); setOrders([]); setDisputes([]); setAuthenticated(false); nav('/'); }}>Sign out</button></div>
     </header>
 
     <main className="page-frame">
@@ -102,13 +112,85 @@ function App() {
 
 function AccessPage({ error, onAuthenticated }: { error: string; onAuthenticated: () => void }) {
   const [password, setPassword] = useState(''); const [localError, setLocalError] = useState(error); const [busy, setBusy] = useState(false);
+  const entry = useEntry();
   const submit = async (event: React.FormEvent) => {
     event.preventDefault(); setBusy(true); setLocalError('');
     try { await api('/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) }); onAuthenticated(); }
     catch (e) { setLocalError(e instanceof Error ? e.message : 'Access was not granted'); }
     finally { setBusy(false); setPassword(''); }
   };
-  return <div className="app-shell access-shell"><main className="access-main"><a className="brand" href="/"><span className="brand-mark" aria-hidden="true">P</span><span>postmark</span></a><form className="paper-panel access-panel" onSubmit={submit}><p className="overline">Seller desk</p><h1>Open your shipping file.</h1><p>Enter the access password configured for this Postmark instance.</p>{localError && <p className="field-error" role="alert">{localError}</p>}<label htmlFor="access-password">Access password</label><input id="access-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /><button className="button button-primary" disabled={busy}>{busy ? 'Opening desk…' : 'Open Postmark'}</button></form></main></div>;
+  const judge = async () => { setBusy(true); setLocalError(''); try { await enterAsJudge(); } catch (e) { setLocalError(e instanceof Error ? e.message : 'Judge entry is not available'); setBusy(false); } };
+  return <div className="app-shell access-shell"><main className="access-main"><a className="brand" href="/" onClick={(e) => { e.preventDefault(); nav('/'); }}><span className="brand-mark" aria-hidden="true">P</span><span>postmark</span></a>
+    <form className="paper-panel access-panel" onSubmit={submit}><p className="overline">Seller desk</p><h1>Open your shipping file.</h1>
+      {entry?.demoMode ? <><p>This is a sandbox demo. Judges can open the seller desk without a password.</p><button type="button" className="button button-primary" disabled={busy} onClick={() => void judge()}>{busy ? 'Opening desk…' : 'Enter as a judge'}</button><p className="access-divider"><span>or sign in as the seller</span></p></>
+        : <p>{entry?.judgePassword ? 'Enter the seller password, or the judge password from the Devpost testing instructions.' : 'Enter the access password configured for this Postmark instance.'}</p>}
+      {localError && <p className="field-error" role="alert">{localError}</p>}
+      <label htmlFor="access-password">Access password</label><input id="access-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+      <button className={`button ${entry?.demoMode ? 'button-secondary' : 'button-primary'}`} disabled={busy}>{busy ? 'Opening desk…' : 'Open Postmark'}</button>
+    </form>
+    <p className="access-back"><a href="/" onClick={(e) => { e.preventDefault(); nav('/'); }}>What is Postmark? See the overview</a></p>
+  </main></div>;
+}
+
+function Landing() {
+  const entry = useEntry(); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  useEffect(() => { document.title = 'Postmark: Seller Protection, checked at the shipping label'; }, []);
+  const openDesk = async () => {
+    if (!entry?.demoMode) { nav('/orders'); return; }
+    setBusy(true); setError('');
+    try { await enterAsJudge(); } catch (e) { setError(e instanceof Error ? e.message : 'Judge entry is not available'); setBusy(false); }
+  };
+  const listing = entry?.demoListing;
+  const itemHref = listing ? `/item/${encodeURIComponent(listing.id)}` : '';
+  return <div className="app-shell landing-shell">
+    <header className="topbar landing-bar"><a className="brand" href="/" aria-label="Postmark home"><span className="brand-mark" aria-hidden="true">P</span><span>postmark</span></a>
+      <span className="landing-bar-note">Built on PayPal Orders, Tracking and Disputes APIs</span>
+      <a className="button button-secondary landing-bar-cta" href="/orders" onClick={(e) => { e.preventDefault(); void openDesk(); }}>Judge entry: seller desk</a></header>
+    <main className="page-frame landing-frame">
+      <section className="landing-hero" aria-labelledby="landing-title">
+        <div className="landing-copy">
+          <p className="overline">PayPal Seller Protection, checked at the shipping label</p>
+          <h1 id="landing-title">Photograph the label before the parcel leaves your hands.</h1>
+          <p className="landing-lede">Postmark reads the shipping label, compares it field by field with the address on the PayPal order, and stamps it <strong className="ink-good">PROTECTED</strong> or <strong className="ink-risk">AT RISK</strong>. Only then does tracking go to PayPal, with the label photo kept as dispute evidence.</p>
+          {error && <p className="field-error" role="alert">{error}</p>}
+          <div className="button-row landing-actions">
+            <button className="button button-primary" disabled={busy} onClick={() => void openDesk()}>{busy ? 'Opening desk…' : entry?.demoMode ? 'Enter the seller desk as a judge' : 'Open the seller desk'}</button>
+            {listing && <a className="button button-secondary" href={itemHref} onClick={(e) => { e.preventDefault(); nav(itemHref); }}>See the buyer page</a>}
+          </div>
+          <p className="field-help landing-access">{entry === null ? 'Checking demo access…' : entry.demoMode ? `Sandbox demo: no password needed.${entry.demoBuyerEmail ? ` Sandbox buyer for checkout: ${entry.demoBuyerEmail}` : ''}` : entry.judgePassword ? 'Judges: the desk password is in the Devpost testing instructions.' : 'The seller desk is password protected.'}</p>
+        </div>
+        <figure className="landing-specimen" aria-label="Example of a label check">
+          <figcaption className="overline">Example check</figcaption>
+          <div className="specimen-label">
+            <span className="specimen-band">SHIP TO</span>
+            <strong>Jordan Ellis</strong>
+            <span className="mono">1455 Market St Apt <mark>999</mark></span>
+            <span className="mono">San Francisco CA 94103</span>
+            <span className="verdict-stamp specimen-stamp" data-verdict="AT RISK">AT RISK</span>
+          </div>
+          <div className="specimen-redline" role="table" aria-label="Field that differs">
+            <div role="row" className="redline-row redline-head"><span role="columnheader">Field</span><span role="columnheader">PayPal</span><span role="columnheader">Label</span></div>
+            <div role="row" className="redline-row"><strong role="rowheader">Unit</strong><span role="cell" className="mono">4B</span><span role="cell" className="mono">999</span></div>
+          </div>
+          <p className="specimen-note">PayPal's proof of delivery needs "an address for the recipient that matches the shipping address on the Transaction Details page". A wrong unit is enough to lose the dispute.</p>
+        </figure>
+      </section>
+      <ol className="landing-steps" aria-label="How Postmark works">
+        <li><span className="step-number mono">01</span><strong>Photograph the label</strong><span>On the phone, before drop-off. AI vision reads carrier, tracking and every address line.</span></li>
+        <li><span className="step-number mono">02</span><strong>Deterministic verdict</strong><span>Code, not the model, compares the label with PayPal's address and checks the tracking format.</span></li>
+        <li><span className="step-number mono">03</span><strong>Tracking on PayPal</strong><span>Posted to the order, read back, and kept with the label photo for any dispute.</span></li>
+      </ol>
+      <section className="judge-path" aria-labelledby="judge-path-title">
+        <h2 id="judge-path-title">One-minute judge path</h2>
+        <ol>
+          <li>{listing ? <><a href={itemHref} onClick={(e) => { e.preventDefault(); nav(itemHref); }}>Open the buyer page</a> and pay with the PayPal sandbox buyer, or skip to the desk.</> : 'Open the seller desk.'}</li>
+          <li>Open the order, print the sandbox label with a wrong unit, photograph or upload it: <strong className="ink-risk">AT RISK</strong> with the field that breaks.</li>
+          <li>Print the matching label and check it: <strong className="ink-good">PROTECTED</strong>. Post tracking and see PayPal confirm it.</li>
+        </ol>
+      </section>
+    </main>
+    <footer className="footer"><span>Postmark</span><span>Check the label before the parcel leaves your hands.</span><a href="https://www.paypal.com/us/legalhub/paypal/seller-protection?locale.x=en_US" target="_blank" rel="noreferrer">PayPal Seller Protection policy</a></footer>
+  </div>;
 }
 
 function SetupPanel({ missing, buyer }: { missing: string[]; buyer: string | null }) {
@@ -244,9 +326,9 @@ function BuyerPage({ id }: { id: string }) {
     catch (e) { setError(e instanceof Error ? e.message : 'Checkout could not start'); setBusy(false); }
   };
   return <div className="app-shell buyer-shell">
-    <header className="buyer-bar"><span className="brand"><span className="brand-mark" aria-hidden="true">P</span><span>postmark</span></span><span className="buyer-bar-note">Paid with PayPal. Shipped to the address on your PayPal order.</span></header>
+    <header className="buyer-bar"><a className="brand" href="/" onClick={(e) => { e.preventDefault(); nav('/'); }}><span className="brand-mark" aria-hidden="true">P</span><span>postmark</span></a><span className="buyer-bar-note">Paid with PayPal. Shipped to the address on your PayPal order.</span></header>
     <main className="page-frame buyer-frame">
-      {!listing ? (error ? <div className="alert" role="alert">{error}</div> : <div className="loading-panel" role="status">Loading item…</div>) : <article className="buyer-item">
+      {!listing ? (error ? <MissingItem message={error} /> : <div className="loading-panel" role="status">Loading item…</div>) : <article className="buyer-item">
         <figure className="buyer-photo"><img src={listingPhoto(listing.id, 1400)} alt={listing.title} /></figure>
         <div className="buyer-copy">
           <p className="overline">For sale</p><h1>{listing.title}</h1>
@@ -260,6 +342,12 @@ function BuyerPage({ id }: { id: string }) {
       </article>}
     </main>
   </div>;
+}
+
+function MissingItem({ message }: { message: string }) {
+  const entry = useEntry(); const other = entry?.demoListing;
+  return <div className="empty-panel missing-item" role="alert"><p className="stamp stamp-neutral">RETURN TO SENDER</p><h1>{message}</h1><p>The link may point to a listing that was removed. {other ? 'The current demo item is still for sale.' : 'Start from the Postmark overview.'}</p>
+    <div className="button-row">{other && <a className="button button-primary" href={`/item/${encodeURIComponent(other.id)}`} onClick={(e) => { e.preventDefault(); nav(`/item/${encodeURIComponent(other.id)}`); }}>See {other.title}</a>}<a className="button button-secondary" href="/" onClick={(e) => { e.preventDefault(); nav('/'); }}>Postmark overview</a></div></div>;
 }
 
 function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string; order?: Order; setup: { missing: string[]; paypalEnv: string }; setError: (value: string) => void; refresh: () => Promise<void> }) {
