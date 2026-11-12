@@ -503,3 +503,4 @@ input[type="file"] { padding: 8px; font-size: 14px; }
   .landing-actions { grid-template-columns: minmax(0, 1fr); }
   .footer-links { margin-left: 0; flex-direction: column; gap: 6px; }
 }
+.urgent-body > p.urgent-risk { margin: 10px 0; padding: 8px 10px; border-left: 3px solid var(--color-accent); background: var(--color-danger-paper); color: var(--color-accent-dark); font-weight: 700; }
