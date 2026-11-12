@@ -490,3 +490,16 @@ input[type="file"] { padding: 8px; font-size: 14px; }
   .tracking-grouped { white-space: normal; }
 }
 .tracker-receipt time { color: inherit; font-size: inherit; }
+.landing-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 20px; align-items: start; max-width: 640px; }
+.landing-action { display: grid; gap: 8px; }
+.landing-action .button { width: 100%; min-height: 52px; font-size: 16px; }
+.landing-action .field-help { margin: 0; font-size: 13px; }
+.button-paypal-cta { color: var(--color-paypal-ink); background: var(--color-paypal-gold); border-color: var(--color-paypal-gold); }
+.button-paypal-cta:hover { filter: brightness(.95); }
+.button-paypal-cta.is-disabled { cursor: default; opacity: .6; }
+.footer-links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 20px; }
+.footer-links a { margin-left: 0; color: var(--color-accent-dark); text-underline-offset: 3px; }
+@media (max-width: 640px) {
+  .landing-actions { grid-template-columns: minmax(0, 1fr); }
+  .footer-links { margin-left: 0; flex-direction: column; gap: 6px; }
+}
