@@ -8,7 +8,7 @@ type Order = {
   id: string; capture_id: string | null; status: string; amount_cents: number; currency: string; buyer_name: string | null;
   protection_state: string; address: Address | null; extraction: any; verdict: any; tracker_id: string | null; has_label: boolean;
   tracking_number: string | null; carrier: string | null; tracker_posted_at: string | null;
-  listing_id: string | null; item_title: string | null; archived_at: string | null; updated_at: string;
+  listing_id: string | null; read_only?: boolean; item_title: string | null; archived_at: string | null; updated_at: string;
 };
 type Listing = { id: string; title: string; description: string; price_cents: number; currency: string; created_at: string; sold_count?: number };
 type Setup = { missing: string[]; paypalEnv: string; demoBuyerEmail: string | null; demoMode?: boolean; disputeAutoAnswer?: boolean };
@@ -31,7 +31,9 @@ function useEntry() {
   useEffect(() => { void api<Entry>('/api/public/entry').then(setEntry).catch(() => setEntry({ demoMode: false, judgePassword: false, paypalEnv: 'sandbox', demoBuyerEmail: null, demoListing: null })); }, []);
   return entry;
 }
-const enterAsJudge = async () => { const result = await api<{ next: string | null }>('/api/session/judge', { method: 'POST' }); location.assign(result.next ? `/orders/${encodeURIComponent(result.next)}` : '/orders'); };
+let sessionRole: 'operator' | 'judge' | null = null;
+const isJudge = () => sessionRole === 'judge';
+const enterAsJudge = async () => { const result = await api<{ next: string | null }>('/api/session/judge', { method: 'POST' }); location.assign(result.next ?? '/orders'); };
 const REPO_URL = 'https://github.com/aarav1656/postmark';
 
 function useRoute() {
@@ -61,18 +63,19 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [orderRows, setupData] = await Promise.all([api<Order[]>('/api/orders'), api<typeof setup>('/api/setup')]);
+      sessionRole = (await api<{ role: 'operator' | 'judge' | null }>('/api/session')).role;
+      const [orderRows, setupData] = await Promise.all([api<Order[]>(isJudge() ? '/api/judge/orders' : '/api/orders'), api<typeof setup>('/api/setup')]);
       setOrders(orderRows); setSetup(setupData); setError('');
-      if (!setupData.missing.includes('PAYPAL_CLIENT_ID') && !setupData.missing.includes('PAYPAL_CLIENT_SECRET')) {
+      if (!isJudge() && !setupData.missing.includes('PAYPAL_CLIENT_ID') && !setupData.missing.includes('PAYPAL_CLIENT_SECRET')) {
         const disputeRows = await api<Dispute[]>('/api/disputes'); setDisputes(disputeRows);
       }
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not load the seller desk'); }
   }, []);
-  useEffect(() => { void api<{ authenticated: boolean; configured: boolean }>('/api/session').then((session) => { setAuthenticated(session.authenticated); if (!session.configured) setAuthError('Set APP_PASSWORD before opening this Postmark instance.'); }).catch(() => setAuthError('Postmark access could not be checked.')).finally(() => setAuthChecked(true)); }, []);
+  useEffect(() => { void api<{ authenticated: boolean; configured: boolean; role: 'operator' | 'judge' | null }>('/api/session').then((session) => { sessionRole = session.role; setAuthenticated(session.authenticated); if (!session.configured) setAuthError('Set APP_PASSWORD before opening this Postmark instance.'); }).catch(() => setAuthError('Postmark access could not be checked.')).finally(() => setAuthChecked(true)); }, []);
   useEffect(() => {
     if (!authenticated) return;
     void refresh();
-    void api('/api/disputes/reconcile', { method: 'POST' }).then(() => refresh()).catch(() => undefined);
+    if (sessionRole === 'operator') void api('/api/disputes/reconcile', { method: 'POST' }).then(() => refresh()).catch(() => undefined);
     const source = new EventSource('/api/events'); source.addEventListener('update', () => void refresh()); return () => source.close();
   }, [refresh, authenticated]);
 
@@ -94,7 +97,7 @@ function App() {
       </a>
       <nav className="main-nav" aria-label="Main navigation">
         <a href="/orders" aria-current={path.startsWith('/orders') ? 'page' : undefined} onClick={(e) => { e.preventDefault(); nav('/orders'); }}>Orders</a>
-        <a href="/disputes" aria-current={path.startsWith('/disputes') ? 'page' : undefined} onClick={(e) => { e.preventDefault(); nav('/disputes'); }}>Disputes <span className="nav-count">{disputes.length}</span></a>
+        {!isJudge() && <a href="/disputes" aria-current={path.startsWith('/disputes') ? 'page' : undefined} onClick={(e) => { e.preventDefault(); nav('/disputes'); }}>Disputes <span className="nav-count">{disputes.length}</span></a>}
         <a href="/shop" aria-current={path === '/shop' ? 'page' : undefined} onClick={(e) => { e.preventDefault(); nav('/shop'); }}>Shop</a>
       </nav>
       <div className="account-mark"><span className={`environment-dot ${setup.paypalEnv === 'live' ? 'live' : ''}`}></span>{setup.paypalEnv}<button className="logout-button" onClick={async () => { await api('/api/session/logout', { method: 'POST' }); setOrders([]); setDisputes([]); setAuthenticated(false); nav('/'); }}>Sign out</button></div>
@@ -123,7 +126,7 @@ function AccessPage({ error, onAuthenticated, judge = false }: { error: string; 
     catch (e) { setLocalError(e instanceof Error ? e.message : 'Access was not granted'); }
     finally { setBusy(false); setPassword(''); }
   };
-  const judgeEntry = async () => { setBusy(true); setLocalError(''); try { await enterAsJudge(); } catch (e) { setLocalError(e instanceof Error ? e.message : 'Judge entry is not available'); setBusy(false); } };
+  const judgeEntry = async () => { setBusy(true); setLocalError(''); try { await enterAsJudge(); } catch (e) { setLocalError(e instanceof Error ? e.message : 'Judge entry opens on the sandbox demo instance.'); setBusy(false); } };
   return <div className="app-shell access-shell"><main className="access-main"><a className="brand" href="/" onClick={(e) => { e.preventDefault(); nav('/'); }}><span className="brand-mark" aria-hidden="true">P</span><span>postmark</span></a>
     <form className="paper-panel access-panel" onSubmit={submit}><p className="overline">{judge ? 'Judge desk' : 'Seller desk'}</p><h1>{judge ? 'Judge sign in.' : 'Operator sign in.'}</h1>
       {entry?.demoMode && !judge ? <><p>This is a sandbox demo. Judges can open the seller desk without a password.</p><button type="button" className="button button-primary" disabled={busy} onClick={() => void judgeEntry()}>{busy ? 'Opening desk…' : 'Enter as a judge'}</button><p className="access-divider"><span>or sign in as the seller</span></p></>
@@ -139,7 +142,7 @@ function AccessPage({ error, onAuthenticated, judge = false }: { error: string; 
 function JudgeEntry() {
   const entry = useEntry(); const [error, setError] = useState('');
   useEffect(() => { document.title = 'Postmark: judge desk'; }, []);
-  useEffect(() => { if (entry?.demoMode) void enterAsJudge().catch((e) => setError(e instanceof Error ? e.message : 'Judge entry is not available')); }, [entry]);
+  useEffect(() => { if (entry?.demoMode) void enterAsJudge().catch((e) => setError(e instanceof Error ? e.message : 'Judge entry opens on the sandbox demo instance.')); }, [entry]);
   if (entry?.judgePassword && !entry.demoMode) return <AccessPage error="" onAuthenticated={() => location.assign('/orders')} judge />;
   const listing = entry?.demoListing;
   return <div className="app-shell access-shell"><main className="access-main"><a className="brand" href="/" onClick={(e) => { e.preventDefault(); nav('/'); }}><span className="brand-mark" aria-hidden="true">P</span><span>postmark</span></a>
@@ -156,7 +159,7 @@ function Landing() {
   const openDesk = async () => {
     if (!entry?.demoMode) { nav(entry?.judgePassword ? '/judge' : '/login'); return; }
     setBusy(true); setError('');
-    try { await enterAsJudge(); } catch (e) { setError(e instanceof Error ? e.message : 'Judge entry is not available'); setBusy(false); }
+    try { await enterAsJudge(); } catch (e) { setError(e instanceof Error ? e.message : 'Judge entry opens on the sandbox demo instance.'); setBusy(false); }
   };
   const listing = entry?.demoListing;
   const itemHref = listing ? `/item/${encodeURIComponent(listing.id)}` : '';
@@ -247,11 +250,11 @@ function OrdersPage({ orders: allOrders, disputes }: { orders: Order[]; disputes
       <section className="workbench">
         <div className="section-heading"><h2>{urgent ? 'Next parcel to check' : cleared ? 'Last parcel cleared' : 'Shipping workbench'}</h2><span className="section-rule"></span></div>
         {urgent ? <UrgentOrder order={urgent} /> : cleared ? <UrgentOrder order={cleared} /> : orders.length ? <div className="quiet-panel"><p className="stamp stamp-neutral">READY</p><h3>Every order is in the ledger.</h3><p>Open an order to add a label photo and run the address check before tracking.</p></div> : <div className="empty-panel"><div className="empty-mark" aria-hidden="true">P</div><h3>Your order desk is clear.</h3><p>Bring in a PayPal order or create a checkout link to start a shipment.</p><div className="button-row"><button className="button button-primary" onClick={() => nav('/shop')}>List an item</button><a className="button button-secondary" href="#import-order" onClick={(e) => { e.preventDefault(); document.getElementById('paypal-order-id')?.focus(); }}>Add PayPal order</a></div></div>}
-        <form className="import-form" id="import-order" onSubmit={importOrder}>
+        {!isJudge() && <form className="import-form" id="import-order" onSubmit={importOrder}>
           <div><label htmlFor="paypal-order-id">Add an existing PayPal order</label><p className="field-help">The order and its shipping address will be read from PayPal.</p></div>
           <div className="inline-form"><input id="paypal-order-id" value={orderId} onChange={(e) => setOrderId(e.target.value)} required aria-describedby="import-error" /><button className="button button-secondary" disabled={busy}>{busy ? 'Reading…' : 'Add order'}</button></div>
           {error && <p className="field-error" id="import-error" role="alert">{error}</p>}
-        </form>
+        </form>}
       </section>
       <aside className="order-rail">
         <div className="section-heading"><h2>Order ledger</h2><span className="rail-total">{orders.length}</span></div>
@@ -314,7 +317,7 @@ function ShopPage() {
           <span className="listing-card-body"><strong>{listing.title}</strong><span className="amount mono">{money(listing.price_cents, listing.currency)}</span><span className="listing-sold">{listing.sold_count ? `${listing.sold_count} paid ${listing.sold_count === 1 ? 'order' : 'orders'}` : 'No paid orders yet'}</span></span>
         </a></li>)}</ul> : <div className="empty-panel"><h3>List your first item to get a buyer page.</h3><p>Photograph something you will ship and set a price. Postmark publishes a page with a PayPal button.</p><button className="button button-secondary" onClick={() => document.getElementById('item-photo')?.click()}>Add the first photo</button></div>}
       </section>
-      <form className="paper-panel shop-form" onSubmit={create}>
+      {!isJudge() && <form className="paper-panel shop-form" onSubmit={create}>
         <h2>List an item</h2>
         <label htmlFor="item-photo" className={`photo-drop ${preview ? 'has-photo' : ''}`}>{preview ? <img src={preview} alt="Selected item photo" /> : <span><strong>Add a photo</strong><span>JPEG, PNG or WebP, under 15 MB</span></span>}</label>
         <input id="item-photo" className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setPhoto(e.target.files?.[0] ?? null)} required />
@@ -324,7 +327,7 @@ function ShopPage() {
         {error && <p className="field-error" role="alert">{error}</p>}
         <button className="button button-primary" disabled={busy || !photo}>{busy ? 'Saving listing…' : 'Publish listing'}</button>
         <p className="field-help">PayPal collects the buyer's shipping address at checkout. Postmark checks your label against it before tracking goes to PayPal.</p>
-      </form>
+      </form>}
     </div>
   </>;
 }
@@ -400,7 +403,7 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
   const address = order.address;
   const protectedPass = order.verdict?.state === 'PROTECTED';
   const atRisk = order.verdict?.state === 'AT RISK';
-  const labelForm = <form className="upload-panel" id="label-check" onSubmit={runLabel}>
+  const labelForm = order.read_only ? null : <form className="upload-panel" id="label-check" onSubmit={runLabel}>
     <p className="upload-title">{atRisk ? 'Check a replacement label' : protectedPass ? 'Label changed? Check it again' : 'Photograph the printed label'}</p>
     <p className="field-help">Take it before you drop the parcel off. Postmark checks it against the address PayPal holds.</p>
     <input id="label-photo" className="visually-hidden" type="file" accept="image/jpeg,image/png" capture="environment" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
@@ -410,7 +413,7 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
     </label>
     {file && <button className="button button-primary check-button" disabled={busy}>{busy ? 'Reading label…' : 'Check this label'}</button>}
   </form>;
-  const sandboxCard = setup.paypalEnv !== 'live' && !setup.missing.includes('PAYPAL_CLIENT_ID') && !setup.missing.includes('PAYPAL_CLIENT_SECRET') && address ? <div className="sandbox-card"><p className="overline">Sandbox only · no parcel needed</p><h3>Print a test label</h3><p>Prints this PayPal address with a marked test tracking number. Open it, then photograph or upload it above.</p><div className="button-row"><a className="button button-secondary" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label`} target="_blank" rel="noreferrer">Print matching label</a><a className="button button-secondary button-risk" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label?wrongUnit=1`} target="_blank" rel="noreferrer">Print label with a wrong unit</a></div></div> : null;
+  const sandboxCard = !order.read_only && setup.paypalEnv !== 'live' && !setup.missing.includes('PAYPAL_CLIENT_ID') && !setup.missing.includes('PAYPAL_CLIENT_SECRET') && address ? <div className="sandbox-card"><p className="overline">Sandbox only · no parcel needed</p><h3>Print a test label</h3><p>Prints this PayPal address with a marked test tracking number. Open it, then photograph or upload it above.</p><div className="button-row"><a className="button button-secondary" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label`} target="_blank" rel="noreferrer">Print matching label</a><a className="button button-secondary button-risk" href={`/api/orders/${encodeURIComponent(order.id)}/sandbox-label?wrongUnit=1`} target="_blank" rel="noreferrer">Print label with a wrong unit</a></div></div> : null;
   return <>
     <div className="breadcrumb"><a href="/orders" onClick={(e) => { e.preventDefault(); nav('/orders'); }}>Orders</a><span aria-hidden="true">/</span><span className="mono">{order.id}</span></div>
     <div className="page-heading"><div><p className="overline">Shipment file</p><h1>{order.buyer_name || 'PayPal order'}</h1><p className="mono">{[order.item_title, order.id].filter(Boolean).join(' · ')} <span className="copy-divider">·</span> {money(order.amount_cents, order.currency)}{order.archived_at ? ' · archived' : ''}</p></div>{!order.verdict && <StatusBadge status={order.protection_state} />}</div>
@@ -421,7 +424,7 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
         {order.verdict && <VerdictPanel verdict={order.verdict} />}
         {order.verdict?.addressDifferences?.length > 0 && <div className="redline-panel"><h3>Address fields to fix</h3><p>Reprint the label with PayPal's value. Seller Protection compares these fields with Transaction Details.</p><div className="redline-table" role="table" aria-label="Address fields that differ"><div className="redline-row redline-head" role="row"><span role="columnheader">Field</span><span role="columnheader">PayPal</span><span role="columnheader">Label</span></div>{order.verdict.addressDifferences.map((diff: any) => { const parts = diffWords(diff.paypal ?? '', diff.label ?? ''); return <div className="redline-row" role="row" key={diff.field}><strong role="rowheader">{addressFieldLabel(diff.field)}</strong><span role="cell"><Marked parts={parts.paypal} kind="good" /></span><span role="cell"><Marked parts={parts.label} kind="risk" /></span></div>; })}</div><a href={order.verdict.policyUrl} target="_blank" rel="noreferrer">Seller Protection policy</a></div>}
         {!order.tracker_id && (!order.verdict || atRisk) && labelForm}
-        {order.extraction && !order.tracker_id && <div className="tracking-action" data-override={atRisk || undefined}>
+        {order.extraction && !order.tracker_id && !order.read_only && <div className="tracking-action" data-override={atRisk || undefined}>
           {!protectedPass && <label className="risk-override"><input type="checkbox" checked={acceptRisk} onChange={(e) => setAcceptRisk(e.target.checked)} />Ship anyway, I accept the risk</label>}
           {(protectedPass || acceptRisk) && <button className={`button ${protectedPass ? 'button-primary' : 'button-secondary'}`} disabled={busy} onClick={() => void postTracking()}>{busy ? 'Checking PayPal…' : protectedPass ? 'Send tracking to PayPal' : 'Send tracking anyway'}</button>}
           <p className="field-help">{protectedPass ? 'Postmark reads the PayPal order back after posting. Tracking shows here only after PayPal confirms it.' : 'Your choice to ship with a mismatched label is recorded with this order.'}</p>
@@ -442,7 +445,7 @@ function OrderPage({ id, order: cached, setup, setError, refresh }: { id: string
         {order.listing_id && <a className="item-chip" href={`/item/${encodeURIComponent(order.listing_id)}`} onClick={(e) => { e.preventDefault(); nav(`/item/${encodeURIComponent(order.listing_id!)}`); }}><img src={listingPhoto(order.listing_id, 160)} alt="" /><span><span className="overline">Item sold</span><strong>{order.item_title}</strong></span></a>}
         <div className="section-heading rail-gap"><h2>PayPal order address</h2></div>
         <div className="address-stock"><p className="address-label">Ship to</p><strong>{order.buyer_name || order.id}</strong><address>{addressLines(address).map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}</address><span className="address-source">Read from PayPal Transaction Details</span></div>
-        <div className="archive-control"><button className="button button-quiet" disabled={busy} onClick={() => void archive(!order.archived_at)}>{order.archived_at ? 'Restore to the desk' : 'Archive this order'}</button><p className="field-help">{order.archived_at ? 'Archived orders stay out of the desk and its totals.' : 'Archiving hides the order from the desk and its totals. PayPal keeps the order.'}</p></div>
+        {!isJudge() && <div className="archive-control"><button className="button button-quiet" disabled={busy} onClick={() => void archive(!order.archived_at)}>{order.archived_at ? 'Restore to the desk' : 'Archive this order'}</button><p className="field-help">{order.archived_at ? 'Archived orders stay out of the desk and its totals.' : 'Archiving hides the order from the desk and its totals. PayPal keeps the order.'}</p></div>}
       </aside>
     </div>
     <OrderDisputes order={order} setup={setup} setError={setError} />
@@ -503,7 +506,7 @@ function DisputePage({ id, setup, setError }: { id: string; setup: Setup; setErr
   useEffect(() => { void load(); }, [load]);
   const draft = async () => { setBusy(true); setError(''); try { const result = await api<{ notes: string }>(`/api/disputes/${encodeURIComponent(id)}/draft`, { method: 'POST' }); setNotes(result.notes); } catch (e) { setError(e instanceof Error ? e.message : 'Draft failed'); } finally { setBusy(false); } };
   const submit = async () => { setBusy(true); setError(''); setMessage(''); const form = new FormData(); form.append('notes', notes);
-    try { const result = await api<{ status: string }>(`/api/disputes/${encodeURIComponent(id)}/evidence`, { method: 'POST', body: form }); setMessage(data?.simulated ? `Simulated: the stand-in PayPal now shows ${result.status}. Nothing was sent to PayPal.` : `PayPal now shows ${result.status}.`); await load(); }
+    try { const result = await api<{ status: string }>(`/api/disputes/${encodeURIComponent(id)}/evidence`, { method: 'POST', body: form }); setMessage(`PayPal now shows ${result.status}.`); await load(); }
     catch (e) { setError(e instanceof Error ? e.message : 'Evidence submission failed'); await load(); } finally { setBusy(false); }
   };
   const sandbox = async (action: 'require-evidence' | 'adjudicate') => { setBusy(true); setError(''); try { const result = await api<any>(`/api/disputes/${encodeURIComponent(id)}/sandbox/${action}`, { method: 'POST' }); setMessage(`Sandbox dispute status: ${result.dispute.status}`); await load(); } catch (e) { setError(e instanceof Error ? e.message : 'Sandbox action failed'); } finally { setBusy(false); } };
@@ -514,7 +517,7 @@ function DisputePage({ id, setup, setError }: { id: string; setup: Setup; setErr
   const cautious = honest || dispute.reason !== 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED';
   return <>
     <div className="breadcrumb"><a href="/disputes" onClick={(e) => { e.preventDefault(); nav('/disputes'); }}>Disputes</a><span aria-hidden="true">/</span><span className="mono">{id}</span></div>
-    <div className="page-heading"><div><p className="overline">{data.simulated ? 'Simulated dispute · not sent to PayPal' : 'Dispute evidence file'}</p><h1>{reasonLabel(dispute.reason)}</h1><p className="mono">{dispute.dispute_id}{dispute.seller_response_due_date ? ` · respond by ${formatTime(dispute.seller_response_due_date)}` : ''}</p></div><StatusBadge status={dispute.status} /></div>
+    <div className="page-heading"><div><p className="overline">Dispute evidence file</p><h1>{reasonLabel(dispute.reason)}</h1><p className="mono">{dispute.dispute_id}{dispute.seller_response_due_date ? ` · respond by ${formatTime(dispute.seller_response_due_date)}` : ''}</p></div><StatusBadge status={dispute.status} /></div>
     {message && <p className="success-line" role="status">{message}</p>}
     <div className="dispute-detail-grid">
       <div className="dispute-main">
@@ -522,20 +525,20 @@ function DisputePage({ id, setup, setError }: { id: string; setup: Setup; setErr
         <section className="paper-panel evidence-editor"><div className="section-heading"><h2>Seller notes</h2></div>
           {honest && <p className="honesty-line" role="note">{plan.protection === 'NO LABEL CHECK' ? 'No label check is on file for this order. These notes cannot claim an address match.' : 'The label did not match the PayPal shipping address. These notes say so; Postmark does not claim Seller Protection for this parcel.'}</p>}
           <p>Pre-filled from stored evidence only: tracking, the PayPal tracker and the field-by-field address check. Review and edit before submitting.</p>
-          {!data.simulated && <button className="button button-secondary" disabled={busy || !order || submitted} onClick={() => void draft()}>{busy ? 'Working…' : 'Redraft notes with AI'}</button>}
+          {<button className="button button-secondary" disabled={busy || !order || submitted} onClick={() => void draft()}>{busy ? 'Working…' : 'Redraft notes with AI'}</button>}
           <label htmlFor="seller-notes">Notes for PayPal</label><textarea id="seller-notes" rows={7} value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={2000} readOnly={submitted} />
-          <div className="submit-bar"><span>{notes.length} / 2,000</span><button className={`button ${cautious ? 'button-secondary' : 'button-primary'}`} disabled={busy || submitted || !notes.trim() || !plan?.canSubmitManually} onClick={() => void submit()}>{submitted ? 'Evidence submitted' : busy ? 'Submitting…' : `${cautious ? 'Submit anyway' : 'Submit evidence'}${data.simulated ? ' (simulated)' : ' to PayPal'}`}</button></div>
+          <div className="submit-bar"><span>{notes.length} / 2,000</span><button className={`button ${cautious ? 'button-secondary' : 'button-primary'}`} disabled={busy || submitted || !notes.trim() || !plan?.canSubmitManually} onClick={() => void submit()}>{submitted ? 'Evidence submitted' : busy ? 'Submitting…' : `${cautious ? 'Submit anyway' : 'Submit evidence'}$ to PayPal`}</button></div>
           <p className="field-help">{submitted ? 'PayPal accepts one evidence submission per request. Postmark will not send this dispute again.' : `Sends ${plan?.evidenceType === 'PROOF_OF_FULFILLMENT' ? 'proof of fulfillment' : 'evidence'} with the stored label photo, carrier and tracking number.`}</p>
         </section>
       </div>
       <aside className="evidence-rail"><div className="section-heading"><h2>Stored evidence</h2></div>{order ? <><div className="evidence-summary"><p><span>Matched order</span><a href={`/orders/${encodeURIComponent(order.id)}`} onClick={(e) => { e.preventDefault(); nav(`/orders/${encodeURIComponent(order.id)}`); }} className="mono">{order.id}</a></p><p><span>Capture ID</span><code>{order.capture_id || 'Not recorded'}</code></p><p><span>Tracking</span><code>{order.carrier || 'Carrier unknown'} · {order.tracking_number || 'Not recorded'}</code></p><p><span>Tracker posted</span><code>{order.tracker_posted_at || 'Not recorded'}</code></p><p><span>Address check</span><StatusBadge status={plan?.protection ?? order.protection_state} /></p></div>{order.has_label && <img className="evidence-photo" src={`/api/labels/${encodeURIComponent(order.id)}`} alt="Shipping label attached to this order" />}</> : <div className="empty-panel"><h3>Link the captured order</h3><p>Add the matching PayPal order ID to connect its shipment evidence.</p></div>}
-      {setup.paypalEnv !== 'live' && !data.simulated && <div className="sandbox-controls"><p className="overline">Sandbox controls</p><button className="button button-secondary" disabled={busy} onClick={() => void sandbox('require-evidence')}>Sandbox: request seller evidence</button><button className="button button-secondary" disabled={busy} onClick={() => void sandbox('adjudicate')}>Sandbox: adjudicate</button></div>}</aside>
+      {setup.paypalEnv !== 'live' && <div className="sandbox-controls"><p className="overline">Sandbox controls</p><button className="button button-secondary" disabled={busy} onClick={() => void sandbox('require-evidence')}>Sandbox: request seller evidence</button><button className="button button-secondary" disabled={busy} onClick={() => void sandbox('adjudicate')}>Sandbox: adjudicate</button></div>}</aside>
     </div>
   </>;
 }
 
 type TimelineEvent = { kind: 'RECEIVED' | 'ASSEMBLED' | 'HELD' | 'SUBMITTED' | 'READ_BACK' | 'FAILED'; at: string; detail: any };
-type DisputeView = { dispute: { dispute_id: string; status: string; reason: string | null; seller_response_due_date: string | null }; plan: any; timeline: TimelineEvent[]; submittedAt: string | null; submittedNotes: string | null; autoAnswer: boolean; simulated: boolean };
+type DisputeView = { dispute: { dispute_id: string; status: string; reason: string | null; seller_response_due_date: string | null }; plan: any; timeline: TimelineEvent[]; submittedAt: string | null; submittedNotes: string | null; autoAnswer: boolean };
 const REASONS: Record<string, string> = { MERCHANDISE_OR_SERVICE_NOT_RECEIVED: 'Item not received', MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED: 'Item not as described', UNAUTHORISED: 'Unauthorised transaction', CREDIT_NOT_PROCESSED: 'Credit not processed', DUPLICATE_TRANSACTION: 'Duplicate transaction', INCORRECT_AMOUNT: 'Incorrect amount', PAYMENT_BY_OTHER_MEANS: 'Paid by other means' };
 const reasonLabel = (reason?: string | null) => (reason && REASONS[reason]) || reason || 'Seller response requested';
 const sqlTime = (value: string) => formatTime(/Z|[+-]\d\d:?\d\d$/.test(value) ? value : `${value.replace(' ', 'T')}Z`);
@@ -555,14 +558,14 @@ function DisputeTimeline({ view }: { view: DisputeView }) {
       <li data-ok={included.trackerId ? true : undefined}>{included.trackerId ? <>Tracking on PayPal: {included.tracking?.carrier} <span className="mono">{groupTracking(included.tracking?.trackingNumber ?? '')}</span>{included.trackerPostedAt ? `, posted ${sqlTime(included.trackerPostedAt)}` : ''}</> : included.tracking ? 'Tracking stored but never posted to PayPal' : 'No tracking number stored'}</li>
       <li className="evidence-type">Evidence type <span className="mono">{included.evidenceType}</span></li>
     </ul> : <p>No matching Postmark order.</p> },
-    submitted ? { key: 'response', title: submitted.detail.mode === 'auto' ? 'Response submitted automatically' : 'Response submitted', state: 'done', at: submitted.at, body: <p>{submitted.detail.simulated ? 'Sent to the simulated PayPal stand-in (not PayPal) ' : 'Sent to PayPal provide-evidence '}with the label photo and {submitted.detail.tracking?.carrier} tracking {groupTracking(submitted.detail.tracking?.trackingNumber ?? '')}.</p> }
+    submitted ? { key: 'response', title: submitted.detail.mode === 'auto' ? 'Response submitted automatically' : 'Response submitted', state: 'done', at: submitted.at, body: <p>Sent to PayPal provide-evidence with the label photo and {submitted.detail.tracking?.carrier} tracking {groupTracking(submitted.detail.tracking?.trackingNumber ?? '')}.</p> }
       : failed ? { key: 'response', title: 'Submission failed', state: 'failed', at: failed.at, body: <p>{failed.detail.message}. Retrying reuses the same PayPal-Request-Id, so PayPal cannot record it twice.</p> }
       : held ? { key: 'response', title: 'Held for the seller', state: 'held', at: held.at, body: <ul className="hold-reasons">{(held.detail.reasons as string[]).map((reason) => <li key={reason}>{reason}</li>)}</ul> }
       : { key: 'response', title: 'Response', state: 'pending', body: <p>{view.autoAnswer ? 'Answers automatically when the evidence qualifies.' : 'Submit from this page.'}</p> },
-    { key: 'readback', title: 'PayPal status read back', state: readBack ? 'done' : 'pending', at: readBack?.at, body: readBack ? <p>{readBack.detail.simulated ? 'Stand-in' : 'PayPal'} now shows <StatusBadge status={readBack.detail.status} />{readBack.detail.evidenceCount ? ` · ${readBack.detail.evidenceCount} evidence item${readBack.detail.evidenceCount === 1 ? '' : 's'} on file` : ''}</p> : <p>Postmark reads the dispute back after submitting and records what PayPal shows.</p> },
+    { key: 'readback', title: 'PayPal status read back', state: readBack ? 'done' : 'pending', at: readBack?.at, body: readBack ? <p>PayPal now shows <StatusBadge status={readBack.detail.status} />{readBack.detail.evidenceCount ? ` · ${readBack.detail.evidenceCount} evidence item${readBack.detail.evidenceCount === 1 ? '' : 's'} on file` : ''}</p> : <p>Postmark reads the dispute back after submitting and records what PayPal shows.</p> },
   ];
   return <section className="dispute-timeline" aria-label="Dispute timeline">
-    <div className="timeline-heading"><h2>Dispute timeline</h2>{view.simulated ? <span className="timeline-tag">Simulated · nothing sent to PayPal</span> : <span className="timeline-tag">{view.autoAnswer ? 'Auto-answer on' : 'Auto-answer off'}</span>}</div>
+    <div className="timeline-heading"><h2>Dispute timeline</h2><span className="timeline-tag">{view.autoAnswer ? 'Auto-answer on' : 'Auto-answer off'}</span></div>
     <ol>{steps.map((step) => <li key={step.key} className={`timeline-step step-${step.state}`}><span className="timeline-dot" aria-hidden="true"></span><div className="timeline-body"><div className="timeline-title"><strong>{step.title}</strong>{step.at && <time dateTime={step.at}>{sqlTime(step.at)}</time>}</div>{step.body}</div></li>)}</ol>
   </section>;
 }
@@ -571,17 +574,13 @@ function OrderDisputes({ order, setup, setError }: { order: Order; setup: Setup;
   const [views, setViews] = useState<DisputeView[] | null>(null); const [busy, setBusy] = useState(false);
   const load = useCallback(() => api<DisputeView[]>(`/api/orders/${encodeURIComponent(order.id)}/disputes`).then(setViews).catch(() => setViews([])), [order.id]);
   useEffect(() => { void load(); }, [load]);
-  const simulate = async (kind: 'INR' | 'SNAD') => { setBusy(true); setError(''); try { await api(`/api/demo/disputes/simulate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: order.id, kind }) }); await load(); } catch (e) { setError(e instanceof Error ? e.message : 'Simulation failed'); } finally { setBusy(false); } };
-  const canSimulate = setup.demoMode && order.capture_id;
-  if (!views || (!views.length && !canSimulate)) return null;
+  if (!views || !views.length) return null;
   return <section className="order-disputes">
     <div className="section-heading"><h2>PayPal disputes</h2><span className="section-rule"></span></div>
     {views.map((view) => <div className="order-dispute" key={view.dispute.dispute_id}>
       <DisputeTimeline view={view} />
       <a className="button button-secondary" href={`/disputes/${encodeURIComponent(view.dispute.dispute_id)}`} onClick={(e) => { e.preventDefault(); nav(`/disputes/${encodeURIComponent(view.dispute.dispute_id)}`); }}>{view.submittedAt ? 'Open dispute file' : 'Review and submit evidence'}</a>
     </div>)}
-    {!views.length && <p className="field-help">No PayPal dispute on this order.</p>}
-    {canSimulate && <div className="sandbox-card"><p className="overline">Sandbox demo · fixture data · nothing sent to PayPal</p><h3>Simulate a buyer dispute</h3><p>Runs a recorded PayPal dispute payload against this order through the same planner and submission code. Each run replaces the previous simulation.</p><div className="button-row"><button className="button button-secondary" disabled={busy} onClick={() => void simulate('INR')}>Item not received</button><button className="button button-secondary" disabled={busy} onClick={() => void simulate('SNAD')}>Item not as described</button></div></div>}
   </section>;
 }
 
