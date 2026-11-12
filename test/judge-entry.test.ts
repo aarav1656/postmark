@@ -41,14 +41,14 @@ describe('public entry and judge access', () => {
     expect((await signIn('owner-test-password')).status).toBe(200);
   });
 
-  it('accepts JUDGE_PASSWORD as a second password and issues the normal session', async () => {
+  it('accepts JUDGE_PASSWORD as a second password and issues a judge session, not the operator one', async () => {
     process.env.JUDGE_PASSWORD = 'judge-test-password';
     expect((await entry()).judgePassword).toBe(true);
     const response = await signIn('judge-test-password');
     expect(response.status).toBe(200);
     const cookie = cookieFrom(response);
-    expect(hasSession(cookie, 'owner-test-password')).toBe(true);
-    expect((await app.request('/api/orders', { headers: { cookie } })).status).toBe(200);
+    expect(hasSession(cookie, 'owner-test-password')).toBe(false);
+    expect((await app.request('/api/orders', { headers: { cookie } })).status).toBe(403);
     expect((await signIn('judge-test-passwor')).status).toBe(401);
   });
 
@@ -58,7 +58,8 @@ describe('public entry and judge access', () => {
     expect(await entry()).toMatchObject({ demoMode: true, demoBuyerEmail: 'buyer@example.com' });
     const response = await app.request('/api/session/judge', { method: 'POST' });
     expect(response.status).toBe(200);
-    expect((await app.request('/api/orders', { headers: { cookie: cookieFrom(response) } })).status).toBe(200);
+    expect((await app.request('/api/orders', { headers: { cookie: cookieFrom(response) } })).status).toBe(403);
+    await expect((await app.request('/api/session', { headers: { cookie: cookieFrom(response) } })).json()).resolves.toMatchObject({ role: 'judge' });
 
     process.env.PAYPAL_ENV = 'live';
     expect((await entry()).demoMode).toBe(false);

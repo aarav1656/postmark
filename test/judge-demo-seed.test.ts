@@ -16,7 +16,7 @@ afterAll(() => {
   rmSync(dataDir, { recursive: true, force: true });
   for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
 });
-const entry = async () => (await app.request('/api/public/entry')).json() as Promise<{ demoListing: { id: string; title: string } | null }>;
+const entry = async () => (await app.request('/api/public/entry')).json() as Promise<{ demoListing: { id: string; title: string; description: string } | null }>;
 const address = JSON.stringify({ address_line_1: '1455 Market St Apt 4B', city: 'San Francisco', state: 'CA', postal_code: '94103', country_code: 'US' });
 const addOrder = (id: string, state: string, extra: Partial<{ tracker: string; archived: boolean }> = {}) => db.prepare(
   `INSERT INTO orders (id,capture_id,status,amount_cents,currency,buyer_name,address_json,protection_state,tracker_id,archived_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
@@ -32,6 +32,8 @@ describe('demo seed for judges', () => {
     process.env.DEMO_MODE = '1';
     const first = (await entry()).demoListing;
     expect(first?.title).toBe('Agfa Box 45 camera');
+    expect(first?.description).not.toMatch(/shutter|viewfinder|ships boxed|clear/i);
+    expect(first?.description).toMatch(/CC0/);
     expect((await entry()).demoListing?.id).toBe(first!.id);
     expect((db.prepare('SELECT COUNT(*) AS n FROM listings').get() as { n: number }).n).toBe(1);
     const photo = await app.request(`/api/public/listings/${first!.id}/photo?w=400`);
@@ -40,17 +42,17 @@ describe('demo seed for judges', () => {
     expect((await app.request(`/api/public/listings/${first!.id}`)).status).toBe(200);
   });
 
-  it('sends the judge to the newest unshipped order, never a posted, archived or protected one', async () => {
+  it('sends a new judge to the listing to buy, never to another session\'s order, then to their own order', async () => {
     process.env.DEMO_MODE = '1';
-    const judge = async () => (await (await app.request('/api/session/judge', { method: 'POST' })).json()) as { next: string | null };
-    expect((await judge()).next).toBeNull();
-    addOrder('POSTED', 'TRACKING ON PAYPAL', { tracker: 'T1' });
-    addOrder('ARCHIVED', 'UNSHIPPED', { archived: true });
-    addOrder('CLEARED', 'PROTECTED');
-    expect((await judge()).next).toBeNull();
-    addOrder('RISKY', 'AT RISK');
-    expect((await judge()).next).toBe('RISKY');
+    const enter = async (cookie = '') => { const response = await app.request('/api/session/judge', { method: 'POST', headers: cookie ? { cookie } : {} }); return { cookie: (response.headers.get('set-cookie') ?? '').split(';')[0], ...(await response.json()) as { next: string } }; };
+    const listing = (await entry()).demoListing!;
     addOrder('FRESH', 'UNSHIPPED');
-    expect((await judge()).next).toBe('FRESH');
+    const first = await enter();
+    expect(first.next).toBe(`/item/${listing.id}`);
+    const { bindJudgeOrder, judgeSession } = await import('../server/judge.ts');
+    addOrder('MINE', 'UNSHIPPED');
+    bindJudgeOrder(db, judgeSession(first.cookie, process.env.APP_PASSWORD!)!, 'MINE');
+    expect((await enter(first.cookie)).next).toBe('/orders/MINE');
+    expect((await enter()).next).toBe(`/item/${listing.id}`);
   });
 });

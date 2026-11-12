@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,7 +13,8 @@ const [{ app }, { db }, answer, { planDisputeAnswer }, { createSessionCookie }] 
 ]);
 // Credentials are set after import so the 30s background reconciler never starts in tests.
 Object.assign(process.env, { PAYPAL_CLIENT_ID: 'test-client', PAYPAL_CLIENT_SECRET: 'test-secret' });
-const { disputeFixture, handleDispute, paypalDisputeClient, timeline } = answer;
+const { handleDispute, paypalDisputeClient, timeline } = answer;
+const disputeFixture = (name: 'inr-waiting-for-seller' | 'snad-waiting-for-seller') => JSON.parse(readFileSync(new URL(`./fixtures/disputes/${name}.json`, import.meta.url), 'utf8'));
 
 afterAll(() => {
   vi.unstubAllGlobals();
@@ -43,7 +44,7 @@ function seedOrder(overrides: Record<string, unknown> = {}) {
 
 // Stand-in for PayPal at the fetch layer: OAuth, dispute GET, provide-evidence. Nothing leaves the process.
 type Call = { method: string; path: string; requestId: string | null; input?: any; file?: { name: string; type: string; size: number } };
-function stubPayPal(initial: Record<string, any>, options: { failEvidence?: boolean } = {}) {
+function stubPayPal(initial: Record<string, any>, options: { failEvidence?: boolean; dropEvidence?: boolean } = {}) {
   let dispute = structuredClone(initial);
   const calls: Call[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
@@ -59,6 +60,7 @@ function stubPayPal(initial: Record<string, any>, options: { failEvidence?: bool
       const file = form.get('file1') as File;
       call.file = { name: file.name, type: file.type, size: file.size };
       if (options.failEvidence) return new Response('{}', { status: 500, headers: { 'paypal-debug-id': 'dbg-1' } });
+      if (options.dropEvidence) return Response.json({ links: [] });
       dispute = { ...dispute, status: 'UNDER_REVIEW', evidences: [...(dispute.evidences ?? []), ...call.input.evidences], links: [] };
       return Response.json({ links: [{ rel: 'self', href: url }] });
     }
@@ -207,27 +209,38 @@ describe('dispute auto-answer through the PayPal Disputes API (fetch mocked)', (
   });
 });
 
-describe('DEMO_MODE dispute simulation', () => {
-  it('is off unless DEMO_MODE is on in sandbox', async () => {
+describe('evidence submission order', () => {
+  it('records SUBMITTED only after PayPal reads the evidence back, and a retry skips the POST when PayPal already has it', async () => {
     seedOrder();
-    const response = await app.request('/api/demo/disputes/simulate', { method: 'POST', body: JSON.stringify({ orderId: 'ORDER-1', kind: 'INR' }), headers: { cookie, 'Content-Type': 'application/json' } });
-    expect(response.status).toBe(404);
+    const notes = 'Shipped with USPS tracking 9400111899223456789012.';
+    const submit = () => { const form = new FormData(); form.set('notes', notes); return app.request('/api/disputes/PP-D-27803/evidence', { method: 'POST', body: form, headers: { cookie } }); };
+    let paypal = stubPayPal(inr(), { dropEvidence: true });
+    expect((await submit()).status).toBe(502);
+    expect(paypal.posts()).toHaveLength(1);
+    expect(timeline('PP-D-27803').map((event) => event.kind)).not.toContain('SUBMITTED');
+    const answered = inr();
+    answered.status = 'UNDER_REVIEW';
+    answered.evidences = [...(answered.evidences ?? []), { evidence_type: 'PROOF_OF_FULFILLMENT', notes, source: 'SUBMITTED_BY_SELLER' }];
+    paypal = stubPayPal(answered);
+    expect((await submit()).status).toBe(200);
+    expect(paypal.posts()).toHaveLength(0);
+    expect(timeline('PP-D-27803').map((event) => event.kind)).toEqual(['SUBMITTED', 'READ_BACK']);
   });
+});
 
-  it('runs a fixture through the planner and the stand-in client without calling PayPal', async () => {
+describe('shipped code answers only real PayPal disputes', () => {
+  it('has no route that creates a simulated dispute, even in DEMO_MODE', async () => {
     seedOrder();
     process.env.DEMO_MODE = '1';
-    const fetchSpy = vi.fn(async () => new Response('blocked', { status: 599 }));
-    vi.stubGlobal('fetch', fetchSpy);
-    const response = await app.request('/api/demo/disputes/simulate?auto=1', { method: 'POST', body: JSON.stringify({ orderId: 'ORDER-1', kind: 'INR' }), headers: { cookie, 'Content-Type': 'application/json' } });
-    expect(response.status).toBe(200);
-    const { disputeId } = await response.json() as { disputeId: string };
-    expect(disputeId).toMatch(/^PP-D-DEMO-INR-/);
-    const view = await (await app.request('/api/orders/ORDER-1/disputes', { headers: { cookie } })).json() as any[];
-    expect(view[0].timeline.map((event: any) => event.kind)).toEqual(['RECEIVED', 'ASSEMBLED', 'SUBMITTED', 'READ_BACK']);
-    expect(view[0].timeline.every((event: any) => event.detail.simulated)).toBe(true);
-    expect(view[0].dispute.status).toBe('UNDER_REVIEW');
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect((db.prepare('SELECT protection_state FROM orders').get() as any).protection_state).toBe('TRACKING ON PAYPAL');
+    const response = await app.request('/api/demo/disputes/simulate', { method: 'POST', body: JSON.stringify({ orderId: 'ORDER-1', kind: 'INR' }), headers: { cookie, 'Content-Type': 'application/json' } });
+    expect(response.status).toBe(404);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM disputes').get() as { n: number }).n).toBe(0);
+  });
+
+  it('keeps dispute fixtures and any PayPal stand-in out of server/ and src/', () => {
+    const shipped = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? shipped(join(dir, entry.name)) : [join(dir, entry.name)]);
+    const files = [...shipped(new URL('../server', import.meta.url).pathname), ...shipped(new URL('../src', import.meta.url).pathname)];
+    expect(files.filter((file) => file.includes('fixtures'))).toEqual([]);
+    expect(files.filter((file) => file.endsWith('.ts') && /simulated|demoClient|DEMO_DISPUTE/.test(readFileSync(file, 'utf8')))).toEqual([]);
   });
 });

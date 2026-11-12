@@ -6,17 +6,12 @@ import { beginOperation, failOperation, finishOperation, paypal } from '../src/p
 import { matchDisputeToOrder, type PayPalDispute, type StoredOrder } from '../src/domain/dispute.ts';
 import { evidenceInput, planDisputeAnswer, type AnswerPlan, type DisputeLike } from '../src/domain/dispute-answer.ts';
 
-export const disputeFixture = (name: 'inr-waiting-for-seller' | 'snad-waiting-for-seller') =>
-  JSON.parse(readFileSync(new URL(`./fixtures/disputes/${name}.json`, import.meta.url), 'utf8')) as PayPalDispute & Record<string, any>;
-
 // One path to PayPal for dispute evidence: the existing `paypal()` client and Disputes v1 provide-evidence.
 export interface DisputeClient {
-  simulated: boolean;
   read(id: string): Promise<PayPalDispute & Record<string, any>>;
   provideEvidence(id: string, body: FormData, requestId: string): Promise<unknown>;
 }
 export const paypalDisputeClient: DisputeClient = {
-  simulated: false,
   read: (id) => paypal(`/v1/customer/disputes/${encodeURIComponent(id)}`),
   provideEvidence: (id, body, requestId) => paypal(`/v1/customer/disputes/${encodeURIComponent(id)}/provide-evidence`, { method: 'POST', body }, requestId),
 };
@@ -65,14 +60,14 @@ const summary = (plan: AnswerPlan) => ({
 export async function handleDispute(detail: PayPalDispute & Record<string, any>, options: { client?: DisputeClient; auto?: boolean; source: string }) {
   const client = options.client ?? paypalDisputeClient;
   const { order, plan } = planFor(detail);
-  recordEvent(detail.dispute_id, order?.id ?? null, 'RECEIVED', { source: options.source, reason: detail.reason ?? null, status: detail.status, dueAt: detail.seller_response_due_date ?? null, amount: detail.dispute_amount ?? null, simulated: client.simulated }, true);
+  recordEvent(detail.dispute_id, order?.id ?? null, 'RECEIVED', { source: options.source, reason: detail.reason ?? null, status: detail.status, dueAt: detail.seller_response_due_date ?? null, amount: detail.dispute_amount ?? null }, true);
   if (alreadySubmitted(detail.dispute_id)) return { plan, submitted: false, already: true };
-  if (!order) { recordEvent(detail.dispute_id, null, 'HELD', { reasons: plan.reasons, simulated: client.simulated }); return { plan, submitted: false }; }
-  recordEvent(detail.dispute_id, order.id, 'ASSEMBLED', { ...summary(plan), notes: plan.notes, simulated: client.simulated });
-  if (plan.decision !== 'SUBMIT') { recordEvent(detail.dispute_id, order.id, 'HELD', { reasons: plan.reasons, manualAllowed: plan.canSubmitManually, simulated: client.simulated }); publish({ type: 'disputes', id: detail.dispute_id }); return { plan, submitted: false }; }
+  if (!order) { recordEvent(detail.dispute_id, null, 'HELD', { reasons: plan.reasons }); return { plan, submitted: false }; }
+  recordEvent(detail.dispute_id, order.id, 'ASSEMBLED', { ...summary(plan), notes: plan.notes });
+  if (plan.decision !== 'SUBMIT') { recordEvent(detail.dispute_id, order.id, 'HELD', { reasons: plan.reasons, manualAllowed: plan.canSubmitManually }); publish({ type: 'disputes', id: detail.dispute_id }); return { plan, submitted: false }; }
   if (timeline(detail.dispute_id).some((event) => event.kind === 'FAILED')) return { plan, submitted: false };
   if (!(options.auto ?? autoAnswerEnabled())) {
-    recordEvent(detail.dispute_id, order.id, 'HELD', { reasons: ['Automatic answers are off (DISPUTE_AUTO_ANSWER is not 1). Review the notes and submit from the dispute page.'], manualAllowed: true, simulated: client.simulated });
+    recordEvent(detail.dispute_id, order.id, 'HELD', { reasons: ['Automatic answers are off (DISPUTE_AUTO_ANSWER is not 1). Review the notes and submit from the dispute page.'], manualAllowed: true });
     publish({ type: 'disputes', id: detail.dispute_id });
     return { plan, submitted: false };
   }
@@ -91,60 +86,32 @@ export async function submitEvidence(disputeId: string, order: StoredOrder, plan
   try {
     const before = await client.read(disputeId);
     const op = beginOperation(operationId, 'provide-dispute-evidence');
-    const input = evidenceInput(plan, notes);
-    const multipart = new FormData();
-    multipart.append('input', new Blob([JSON.stringify(input)], { type: 'application/json' }));
-    const labelType = extname(order.label_path).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
-    multipart.append('file1', new Blob([readFileSync(order.label_path)], { type: labelType }), `label${extname(order.label_path)}`);
-    if (!op.done) await client.provideEvidence(disputeId, multipart, op.requestId);
-    recordEvent(disputeId, order.id, 'SUBMITTED', { mode, evidenceType: plan.evidenceType, tracking: plan.included.tracking, labelPhoto: true, notes: notes.trim(), protection: plan.protection, requestId: op.requestId, simulated: client.simulated });
-    const after = await client.read(disputeId);
-    const evidenceChanged = JSON.stringify(after.evidences ?? []) !== JSON.stringify(before.evidences ?? []);
-    if (after.status === before.status && !evidenceChanged) throw new Error('PayPal read-back did not show a dispute status or evidence change');
+    // A retry after a lost response: PayPal already holds these notes, so the POST is not sent again.
+    const onPayPal = (dispute: Record<string, any>) => (dispute.evidences ?? []).some((item: any) => typeof item.notes === 'string' && item.notes.trim() === notes.trim());
+    const alreadyOnPayPal = onPayPal(before);
+    if (!alreadyOnPayPal) {
+      const multipart = new FormData();
+      multipart.append('input', new Blob([JSON.stringify(evidenceInput(plan, notes))], { type: 'application/json' }));
+      const labelType = extname(order.label_path).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
+      multipart.append('file1', new Blob([readFileSync(order.label_path)], { type: labelType }), `label${extname(order.label_path)}`);
+      await client.provideEvidence(disputeId, multipart, op.requestId);
+    }
+    const after = alreadyOnPayPal ? before : await client.read(disputeId);
+    if (!onPayPal(after)) throw new Error('PayPal read-back does not show the submitted evidence');
+    recordEvent(disputeId, order.id, 'SUBMITTED', { mode, evidenceType: plan.evidenceType, tracking: plan.included.tracking, labelPhoto: true, notes: notes.trim(), protection: plan.protection, requestId: op.requestId, retriedWithoutPost: alreadyOnPayPal });
     finishOperation(operationId, disputeId);
     db.prepare(`INSERT INTO disputes(id,order_id,capture_id,status,reason,due_at,details_json,evidence_notes,evidence_submitted_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET status=excluded.status,details_json=excluded.details_json,evidence_notes=excluded.evidence_notes,evidence_submitted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP`)
       .run(disputeId, order.id, order.capture_id, after.status, after.reason ?? null, after.seller_response_due_date ?? null, JSON.stringify(after), notes.trim());
-    if (!client.simulated) db.prepare("UPDATE orders SET protection_state='EVIDENCE SUBMITTED',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(order.id);
+    db.prepare("UPDATE orders SET protection_state='EVIDENCE SUBMITTED',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(order.id);
     db.prepare("DELETE FROM dispute_events WHERE dispute_id=? AND kind IN ('HELD','FAILED')").run(disputeId);
-    recordEvent(disputeId, order.id, 'READ_BACK', { status: after.status, stage: after.dispute_life_cycle_stage ?? null, evidenceCount: (after.evidences ?? []).length, simulated: client.simulated });
+    recordEvent(disputeId, order.id, 'READ_BACK', { status: after.status, stage: after.dispute_life_cycle_stage ?? null, evidenceCount: (after.evidences ?? []).length });
     publish({ type: 'disputes', id: disputeId });
     return after;
   } catch (error) {
     failOperation(operationId, error);
-    recordEvent(disputeId, order.id, 'FAILED', { message: error instanceof Error ? error.message : String(error), simulated: client.simulated });
+    recordEvent(disputeId, order.id, 'FAILED', { message: error instanceof Error ? error.message : String(error) });
     publish({ type: 'disputes', id: disputeId });
     throw error;
   } finally { inFlight.delete(disputeId); }
-}
-
-// DEMO_MODE only: fixture disputes answered by an in-memory stand-in for PayPal. Nothing is sent to PayPal,
-// and every timeline event carries simulated: true so the UI labels it.
-export const DEMO_DISPUTE_PREFIX = 'PP-D-DEMO-';
-const demoState = new Map<string, PayPalDispute & Record<string, any>>();
-export function demoDispute(kind: 'INR' | 'SNAD', captureId: string, orderId: string) {
-  const template = disputeFixture(kind === 'INR' ? 'inr-waiting-for-seller' : 'snad-waiting-for-seller');
-  const id = `${DEMO_DISPUTE_PREFIX}${kind}-${orderId.slice(-6)}`;
-  template.dispute_id = id;
-  template.disputed_transactions = template.disputed_transactions!.map((tx: any) => ({ ...tx, seller_transaction_id: captureId }));
-  template.links = (template.links ?? []).map((link: any) => ({ ...link, href: String(link.href).replace(/PP-D-\d+/, id) }));
-  template.create_time = template.update_time = new Date().toISOString();
-  return template;
-}
-export const demoClient: DisputeClient = {
-  simulated: true,
-  async read(id) { const value = demoState.get(id); if (!value) throw new Error('Unknown demo dispute'); return structuredClone(value); },
-  async provideEvidence(id, body) {
-    const value = demoState.get(id); if (!value) throw new Error('Unknown demo dispute');
-    const input = JSON.parse(await (body.get('input') as Blob).text());
-    demoState.set(id, { ...value, status: 'UNDER_REVIEW', links: (value.links ?? []).filter((link: any) => link.rel === 'self'),
-      evidences: [...(value.evidences ?? []), ...input.evidences.map((item: any) => ({ ...item, source: 'SUBMITTED_BY_SELLER', date: new Date().toISOString() }))] });
-    return undefined;
-  },
-};
-export function resetDemoDispute(detail: PayPalDispute & Record<string, any>) {
-  demoState.set(detail.dispute_id, structuredClone(detail));
-  db.prepare('DELETE FROM dispute_events WHERE dispute_id=?').run(detail.dispute_id);
-  db.prepare('DELETE FROM paypal_operations WHERE id=?').run(evidenceOperationId(detail.dispute_id));
-  db.prepare('DELETE FROM disputes WHERE id=?').run(detail.dispute_id);
 }

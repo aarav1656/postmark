@@ -21,7 +21,8 @@ import { CheckoutPaymentIntent, ItemCategory, PaypalExperienceUserAction, Paypal
 import { renderSandboxLabel } from '../src/domain/sandbox-label.ts';
 import { findTracker } from '../src/domain/tracker.ts';
 import { resetLabelAssessment } from './label-assessment.ts';
-import { AlreadyAnswered, DEMO_DISPUTE_PREFIX, autoAnswerEnabled, demoClient, demoDispute, handleDispute, paypalDisputeClient, planFor, resetDemoDispute, storeDispute, submitEvidence, timeline } from './dispute-answer.ts';
+import { bindJudgeOrder, clearJudgeCookie, createJudgeCookie, judgeMay, judgeOrderIds, judgeSession, takeLabelUpload } from './judge.ts';
+import { AlreadyAnswered, autoAnswerEnabled, handleDispute, paypalDisputeClient, planFor, storeDispute, submitEvidence, timeline } from './dispute-answer.ts';
 
 export const app = new Hono();
 const frontendOrigin = new URL(process.env.PUBLIC_URL || 'http://localhost:8787').origin;
@@ -129,9 +130,15 @@ const requirePaypal = (c: any) => {
 
 app.get('/api/health', (c) => c.json({ ok: true, missing: missingEnv() }));
 const secureCookie = () => (process.env.PUBLIC_URL || '').startsWith('https://');
-app.get('/api/session', (c) => c.json({ configured: Boolean(process.env.APP_PASSWORD), authenticated: hasSession(c.req.header('cookie'), process.env.APP_PASSWORD || '') }));
+const roleOf = (cookie: string | undefined) => {
+  const secret = process.env.APP_PASSWORD || '';
+  if (hasSession(cookie, secret)) return { role: 'operator' as const, judgeId: null };
+  const judgeId = judgeSession(cookie, secret);
+  return judgeId ? { role: 'judge' as const, judgeId } : null;
+};
+app.get('/api/session', (c) => { const who = roleOf(c.req.header('cookie')); return c.json({ configured: Boolean(process.env.APP_PASSWORD), authenticated: Boolean(who), role: who?.role ?? null }); });
 // Judge access is opt-in. JUDGE_PASSWORD is a second password accepted at sign-in; DEMO_MODE=1 adds a
-// one-click judge entry on sandbox. Both issue the same session cookie, still signed with APP_PASSWORD.
+// one-click judge entry on sandbox. Both issue a judge session (server/judge.ts), never the operator's.
 const passwordMatches = (supplied: string, expected: string | undefined) => {
   if (!expected) return false;
   const a = Buffer.from(supplied); const b = Buffer.from(expected);
@@ -143,22 +150,35 @@ app.post('/api/session', async (c) => {
   if (!password) return c.json({ error: 'Set APP_PASSWORD to protect this Postmark instance.' }, 503);
   const body = z.object({ password: z.string().min(1) }).safeParse(await c.req.json().catch(() => ({})));
   if (!body.success) return c.json({ error: 'Enter the Postmark access password.' }, 400);
-  if (!passwordMatches(body.data.password, password) && !passwordMatches(body.data.password, process.env.JUDGE_PASSWORD)) return c.json({ error: 'The access password did not match.' }, 401);
-  c.header('Set-Cookie', createSessionCookie(password, secureCookie()));
-  return c.json({ authenticated: true });
+  if (passwordMatches(body.data.password, password)) { c.header('Set-Cookie', createSessionCookie(password, secureCookie())); return c.json({ authenticated: true, role: 'operator' }); }
+  if (!passwordMatches(body.data.password, process.env.JUDGE_PASSWORD)) return c.json({ error: 'The access password did not match.' }, 401);
+  c.header('Set-Cookie', createJudgeCookie(password, secureCookie()).header);
+  return c.json({ authenticated: true, role: 'judge' });
 });
-// The judge lands on the newest paid order that still needs a label check. DEMO_ORDER_ID (a real sandbox
-// order id) is read from PayPal once if it is not on the desk yet; nothing is invented.
-const nextJudgeOrder = () => (db.prepare(`SELECT id FROM orders WHERE archived_at IS NULL AND address_json IS NOT NULL AND tracker_id IS NULL
-  AND protection_state IN ('UNSHIPPED','AT RISK') ORDER BY CASE protection_state WHEN 'UNSHIPPED' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`).get() as { id: string } | undefined)?.id ?? null;
+// A judge lands on their own unshipped order, else the demo listing to buy, else DEMO_ORDER_ID (a real
+// sandbox order read from PayPal once, shown read-only).
+const entryListing = () => {
+  const pinned = process.env.DEMO_LISTING_ID ? getListing(process.env.DEMO_LISTING_ID) : undefined;
+  return pinned ?? (db.prepare('SELECT * FROM listings ORDER BY created_at DESC, rowid DESC LIMIT 1').get() as ReturnType<typeof getListing>);
+};
+const judgeNext = (judgeId: string) => {
+  const own = judgeOrderIds(db, judgeId).map((id) => getOrderRow(id)).find((order) => order && !order.tracker_id && ['UNSHIPPED', 'AT RISK'].includes(String(order.protection_state)));
+  if (own) return `/orders/${encodeURIComponent(own.id)}`;
+  const listing = entryListing();
+  if (listing) return `/item/${encodeURIComponent(listing.id)}`;
+  return process.env.DEMO_ORDER_ID ? `/orders/${encodeURIComponent(process.env.DEMO_ORDER_ID)}` : '/orders';
+};
 app.post('/api/session/judge', async (c) => {
   if (!demoModeEnabled()) return c.json({ error: 'Judge entry is not enabled on this Postmark instance.' }, 404);
   const demoOrderId = process.env.DEMO_ORDER_ID;
   if (demoOrderId && !getOrder(demoOrderId) && process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET) {
     try { savePaypalOrder(await getPaypalOrder(demoOrderId)); } catch { /* the desk still opens; the order can be added by id */ }
   }
-  c.header('Set-Cookie', createSessionCookie(process.env.APP_PASSWORD!, secureCookie()));
-  return c.json({ authenticated: true, judge: true, next: nextJudgeOrder() });
+  const secret = process.env.APP_PASSWORD!;
+  const judge = createJudgeCookie(secret, secureCookie(), judgeSession(c.req.header('cookie'), secret) ?? undefined);
+  c.header('Set-Cookie', judge.header);
+  ensureDemoListing();
+  return c.json({ authenticated: true, role: 'judge', next: judgeNext(judge.sessionId) });
 });
 const demoPhoto = new URL('./demo/agfa-box-45.jpg', import.meta.url);
 const ensureDemoListing = () => {
@@ -168,12 +188,11 @@ const ensureDemoListing = () => {
   const photoPath = join(listingsDir, `${id}.jpg`);
   copyFileSync(demoPhoto, photoPath);
   db.prepare('INSERT INTO listings (id,title,description,price_cents,currency,photo_path) VALUES (?,?,?,?,?,?)').run(
-    id, 'Agfa Box 45 camera', 'Pre-war box camera in black leatherette. Shutter fires, viewfinder clear. Ships boxed. Sandbox demo listing: pay with a PayPal sandbox account.', 4200, 'USD', photoPath);
+    id, 'Agfa Box 45 camera', 'Agfa Box 45 box camera, as shown in the photo. Sandbox listing: pay with a PayPal sandbox account or a sandbox card. Photo: Nemat Zadeh Mohammad, Wikimedia Commons, CC0 1.0.', 4200, 'USD', photoPath);
 };
 app.get('/api/public/entry', (c) => {
   ensureDemoListing();
-  const pinned = process.env.DEMO_LISTING_ID ? getListing(process.env.DEMO_LISTING_ID) : undefined;
-  const listing = pinned ?? (db.prepare('SELECT * FROM listings ORDER BY created_at DESC, rowid DESC LIMIT 1').get() as ReturnType<typeof getListing>);
+  const listing = entryListing();
   return c.json({
     demoMode: demoModeEnabled(),
     judgePassword: Boolean(process.env.JUDGE_PASSWORD),
@@ -182,12 +201,25 @@ app.get('/api/public/entry', (c) => {
     demoListing: listing ? publicListing(listing) : null,
   });
 });
-app.post('/api/session/logout', (c) => { c.header('Set-Cookie', clearSessionCookie(secureCookie())); return c.json({ authenticated: false }); });
+app.post('/api/session/logout', (c) => { c.header('Set-Cookie', clearSessionCookie(secureCookie())); c.header('Set-Cookie', clearJudgeCookie(secureCookie()), { append: true }); return c.json({ authenticated: false }); });
 app.use('/api/*', async (c, next) => {
   const path = new URL(c.req.url).pathname;
   if (path === '/api/health' || path === '/api/session' || path === '/api/session/logout' || path === '/api/session/judge' || path === '/api/webhooks/paypal' || path.startsWith('/api/public/')) return next();
-  if (!hasSession(c.req.header('cookie'), process.env.APP_PASSWORD || '')) return c.json({ error: 'Enter the Postmark access password to continue.' }, 401);
+  const who = roleOf(c.req.header('cookie'));
+  if (!who) return c.json({ error: 'Enter the Postmark access password to continue.' }, 401);
+  if (who.role === 'judge') {
+    const owned = new Set(judgeOrderIds(db, who.judgeId));
+    if (!judgeMay(c.req.method, path, (id) => owned.has(id), process.env.DEMO_ORDER_ID)) return c.json({ error: 'This judge session can open only the orders it paid for.' }, 403);
+    if (c.req.method === 'POST' && path.endsWith('/label') && !takeLabelUpload(who.judgeId)) return c.json({ error: 'This judge session has checked 10 labels in the last hour. Try again later.' }, 429);
+  }
   await next();
+});
+app.get('/api/judge/orders', (c) => {
+  const judgeId = judgeSession(c.req.header('cookie'), process.env.APP_PASSWORD || '');
+  if (!judgeId) return c.json({ error: 'Judge session required.' }, 403);
+  const owned = new Set(judgeOrderIds(db, judgeId));
+  const ids = [...owned, ...(process.env.DEMO_ORDER_ID && !owned.has(process.env.DEMO_ORDER_ID) ? [process.env.DEMO_ORDER_ID] : [])];
+  return c.json(ids.flatMap((id) => { const order = publicOrder(id); return order ? [{ ...order, read_only: !owned.has(id) }] : []; }));
 });
 
 app.get('/api/setup', (c) => c.json({ missing: missingEnv(), paypalEnv: process.env.PAYPAL_ENV || 'sandbox', demoBuyerEmail: process.env.DEMO_BUYER_EMAIL || null, demoMode: demoModeEnabled(), disputeAutoAnswer: autoAnswerEnabled() }));
@@ -308,6 +340,8 @@ app.post('/api/public/listings/:id/capture', async (c) => {
       if (readback.status !== 'COMPLETED' || !readback.purchase_units?.[0]?.payments?.captures?.[0]?.id) throw new Error(`Payment is not complete. PayPal order status: ${readback.status}`);
       finishOperation(operationId, body.data.orderId);
       savePaypalOrder(readback);
+      const judgeId = judgeSession(c.req.header('cookie'), process.env.APP_PASSWORD || '');
+      if (judgeId) bindJudgeOrder(db, judgeId, readback.id);
       return c.json({ id: readback.id, status: readback.status });
     } catch (error) { failOperation(operationId, error); throw error; }
   } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'PayPal capture failed' }, 502); }
@@ -389,22 +423,16 @@ app.post('/api/disputes/reconcile', async (c) => {
 });
 app.get('/api/disputes/:id', async (c) => {
   const id = c.req.param('id');
-  const demo = id.startsWith(DEMO_DISPUTE_PREFIX);
-  if (!demo) { const unavailable = requirePaypal(c); if (unavailable) return unavailable; }
+  const unavailable = requirePaypal(c); if (unavailable) return unavailable;
   try {
-    const dispute = demo ? await localDispute(id) : await paypal<PayPalDispute & Record<string, any>>(`/v1/customer/disputes/${encodeURIComponent(id)}`);
-    if (!dispute) return c.json({ error: 'Dispute not found' }, 404);
+    const dispute = await paypal<PayPalDispute & Record<string, any>>(`/v1/customer/disputes/${encodeURIComponent(id)}`);
     const { order, plan } = planFor(dispute);
     return c.json({ dispute: { dispute_id: dispute.dispute_id, status: dispute.status, reason: dispute.reason, seller_response_due_date: dispute.seller_response_due_date }, order: order ? publicOrder(order.id) : null, ...answerView(id, plan) });
   } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Dispute lookup failed' }, 502); }
 });
-async function localDispute(id: string) {
-  const row = db.prepare('SELECT details_json FROM disputes WHERE id=?').get(id) as { details_json: string } | undefined;
-  return row ? JSON.parse(row.details_json) as PayPalDispute & Record<string, any> : undefined;
-}
 function answerView(id: string, plan: ReturnType<typeof planFor>['plan']) {
   const row = db.prepare('SELECT evidence_submitted_at, evidence_notes FROM disputes WHERE id=?').get(id) as { evidence_submitted_at: string | null; evidence_notes: string | null } | undefined;
-  return { plan, timeline: timeline(id), submittedAt: row?.evidence_submitted_at ?? null, submittedNotes: row?.evidence_notes ?? null, autoAnswer: autoAnswerEnabled(), simulated: id.startsWith(DEMO_DISPUTE_PREFIX) };
+  return { plan, timeline: timeline(id), submittedAt: row?.evidence_submitted_at ?? null, submittedNotes: row?.evidence_notes ?? null, autoAnswer: autoAnswerEnabled() };
 }
 app.get('/api/orders/:id/disputes', (c) => {
   const rows = db.prepare('SELECT id, details_json FROM disputes WHERE order_id=? ORDER BY updated_at DESC').all(c.req.param('id')) as Array<{ id: string; details_json: string }>;
@@ -413,19 +441,6 @@ app.get('/api/orders/:id/disputes', (c) => {
     const { plan } = planFor(detail);
     return { dispute: { dispute_id: row.id, status: detail.status, reason: detail.reason ?? null, seller_response_due_date: detail.seller_response_due_date ?? null }, ...answerView(row.id, plan) };
   }));
-});
-app.post('/api/demo/disputes/simulate', async (c) => {
-  if (!demoModeEnabled()) return c.json({ error: 'Dispute simulation is only available in sandbox demo mode.' }, 404);
-  const body = z.object({ orderId: z.string().min(1), kind: z.enum(['INR', 'SNAD']) }).safeParse(await c.req.json().catch(() => null));
-  if (!body.success) return c.json({ error: 'Send an orderId and kind INR or SNAD.' }, 400);
-  const order = getOrderRow(body.data.orderId);
-  if (!order?.capture_id) return c.json({ error: 'Only a paid order can be disputed.' }, 409);
-  const detail = demoDispute(body.data.kind, order.capture_id, order.id);
-  resetDemoDispute(detail);
-  storeDispute(detail, order.id);
-  try { await handleDispute(detail, { client: demoClient, auto: autoAnswerEnabled() || c.req.query('auto') === '1', source: 'simulated fixture' }); }
-  catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Simulation failed', disputeId: detail.dispute_id }, 502); }
-  return c.json({ disputeId: detail.dispute_id });
 });
 app.post('/api/disputes/:id/draft', async (c) => {
   try {
@@ -439,13 +454,11 @@ app.post('/api/disputes/:id/draft', async (c) => {
 });
 app.post('/api/disputes/:id/evidence', async (c) => {
   const id = c.req.param('id');
-  const demo = id.startsWith(DEMO_DISPUTE_PREFIX);
-  if (!demo) { const unavailable = requirePaypal(c); if (unavailable) return unavailable; }
-  if (demo && !demoModeEnabled()) return c.json({ error: 'Dispute simulation is only available in sandbox demo mode.' }, 404);
+  const unavailable = requirePaypal(c); if (unavailable) return unavailable;
   const form = await c.req.formData();
   const notes = form.get('notes');
   if (typeof notes !== 'string' || !notes.trim()) return c.json({ error: 'Review and enter seller notes before submitting.' }, 400);
-  const client = demo ? demoClient : paypalDisputeClient;
+  const client = paypalDisputeClient;
   try {
     const dispute = await client.read(id);
     const { order, plan } = planFor(dispute);

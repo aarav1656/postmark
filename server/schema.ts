@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS dispute_events (
   PRIMARY KEY (dispute_id, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_dispute_events_order ON dispute_events(order_id);
+CREATE TABLE IF NOT EXISTS judge_orders (
+  session_id TEXT NOT NULL,
+  order_id TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (session_id, order_id)
+);
 CREATE INDEX IF NOT EXISTS idx_orders_state ON orders(protection_state);
 CREATE INDEX IF NOT EXISTS idx_disputes_order ON disputes(order_id);
 `;
